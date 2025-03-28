@@ -1,0 +1,1774 @@
+#include <ql_oe.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <pthread.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include "gps.h"
+#include "network.h"
+#include "log.h"
+#include "database.h"
+#include "driver.h"
+#include "devconfig.h"
+#include "fw.h"
+#include "store.h"
+#include "encrypt.h"
+#include "filter.h"
+#include "camera.h"
+
+GPS_typedef GPS_Data;
+
+static u16 camera_count_ = 0;
+
+mcu_type_def MCU_Data;
+
+u8 GPS_READY = 0;
+
+char svs_inf[32];
+char svs_info[64];
+char ir_led_info[64];
+
+static enum {
+	VEHICLE_STATE_RUN,
+	VEHICLE_STATE_STOP
+} vehicle_status;
+
+#define pi 3.14159265358979323846
+
+double deg2rad(double deg) {
+  return (deg * pi / 180);
+}
+
+double rad2deg(double rad) {
+  return (rad * 180 / pi);
+}
+
+u16 get_frq_reset(void){
+	if(DeviceSetting.time_reset_increment > 25200){
+		DeviceSetting.time_reset_increment = 0;
+		write_number(TIME_RESET_INCREMENT, (u64)DeviceSetting.time_reset_increment);
+		sync();
+	}
+	if(DeviceSetting.time_reset_increment >= 3600) return DeviceSetting.time_reset_increment;
+	return SystemSetting.data.time_reset_when_disconnect + DeviceSetting.time_reset_increment;
+}
+
+void increase_frq_reset(void){
+	DeviceSetting.time_reset_increment = DeviceSetting.time_reset_increment + 3600;
+	write_number(TIME_RESET_INCREMENT, (u64)DeviceSetting.time_reset_increment);
+	sync();
+}
+
+void clear_time_reset_increment(void){
+	DeviceSetting.time_reset_increment = 0;
+	write_number(TIME_RESET_INCREMENT, (u64)DeviceSetting.time_reset_increment);
+	sync();
+}
+
+double calculate_distance(loc_def loc1, loc_def loc2, char unit) {
+  double theta, dist;
+  if ((loc1.latitude == loc2.latitude) && (loc1.longitude == loc2.longitude)) {
+    return 0;
+  }else {
+    theta = loc1.longitude - loc2.longitude;
+    dist = sin(deg2rad(loc1.latitude)) * sin(deg2rad(loc2.latitude)) + cos(deg2rad(loc1.latitude)) * cos(deg2rad(loc2.latitude)) * cos(deg2rad(theta));
+    dist = acos(dist);
+    dist = rad2deg(dist);
+    dist = dist * (float)60.0 * (float)1.1515;
+    switch(unit) {
+      case 'M':
+        break;
+      case 'K':
+        dist = dist * (float)1.609344;
+        break;
+      case 'm':
+        dist = dist * (float)1.609344 * (float)1000.0;
+        break;
+      case 'N':
+        dist = dist * (float)0.8684;
+        break;
+      case 'H':
+        dist = dist * (float)1.609344 * (float)0.539957;
+        break;
+    }
+    return (dist);
+  }
+}
+
+u8 get_acc(void){
+	switch(SystemSetting.data.AccMode){
+		case ACC_LSM:
+			return (MCU_Data.Hard_Acc | LSM_ACC);
+		case ACC_ONLY:
+			 return MCU_Data.Hard_Acc;
+		case LSM_ONLY:
+			return LSM_ACC;
+		case NO_ACC_LSM_SPEED:{
+			if(GPS_Data.tmp_speed > SystemSetting.data.RunLevel){
+				return 1;
+			}else{
+				return 0;
+			}
+		}
+		case NO_ACC_LSM_NO_SPEED:
+			return 1;
+	}
+}
+
+#define LOW_EXT_POWER_LEVEL  7000
+u8 power_main_status(void){
+	if(MCU_Data.main_power < LOW_EXT_POWER_LEVEL)
+		return 0;
+	return 1;
+}
+#define POWER_STATUS power_main_status()
+
+static void cal_tcp_freq(void){
+	if(Vehicle_in_China() == true){
+		if(ACC_STATUS){
+			GPS_Data.freq_send = (SystemSetting.data.FrqRun * 6);
+		}else{
+			GPS_Data.freq_send = (SystemSetting.data.FrqStop * 3);
+		}
+	}else{
+		if(ACC_STATUS){
+			GPS_Data.acc_time++;
+			if(GPS_Data.acc_time > 10){
+				GPS_Data.acc_time = 0;
+				GPS_Data.stop_time = 0;
+			}
+		}else if(GPS_Data.stop_time < TIME_10_MINUTES){
+			GPS_Data.stop_time ++;
+		}
+
+		if(GPS_Data.stop_time > TIME_3_MINUTES){
+			vehicle_status = VEHICLE_STATE_STOP;
+			GPS_Data.freq_send = SystemSetting.data.FrqStop;
+			GPS_Data.freq_send_camera = SystemSetting.data.FrqCaptureStop;
+		}else{
+			vehicle_status = VEHICLE_STATE_RUN;
+			GPS_Data.freq_send = SystemSetting.data.FrqRun;
+			GPS_Data.freq_send_camera = SystemSetting.data.FrqCaptureRun;
+		}
+	}
+}
+
+void update_rfid_driver_data(void){
+	u8 tmp8;
+	u16 tmp16;
+	u64 tmp64;
+	u8 mcu_data[256];
+
+	mcu_data[0] = '>';
+	mcu_data[1] = '>';
+	mcu_data[2] = 0x03;
+
+	/* device status */
+	mcu_data[3] = tibase.LoginStatus | (tibase.driver_info.sync << 4);
+	mcu_data[4] = tibase.UID & 0xFF;
+	mcu_data[5] = (tibase.UID >> 8)  & 0xFF;
+	mcu_data[6] = (tibase.UID >> 16) & 0xFF;
+	mcu_data[7] = (tibase.UID >> 24) & 0xFF;
+	mcu_data[8] = (tibase.UID >> 32) & 0xFF;
+	mcu_data[9] = (tibase.UID >> 40) & 0xFF;
+	mcu_data[10] =  (tibase.UID >> 48) & 0xFF;
+
+	/* is sync tag uid */
+	mcu_data[9] = tibase.driver_info.sync;
+
+	memcpy(mcu_data + 11, tibase.driver_info.DriverName, MAX_SIZE_DRIVER_NAME);
+
+	memcpy(mcu_data + 11 + MAX_SIZE_DRIVER_NAME, tibase.driver_info.DriverLicense, MAX_SIZE_DRIVER_LICENSE);
+
+	memcpy(mcu_data + 11 + MAX_SIZE_DRIVER_NAME + MAX_SIZE_DRIVER_LICENSE, tibase.driver_info.IssDate, MAX_SIZE_TAG_DATE);
+
+	memcpy(mcu_data + 11 + MAX_SIZE_DRIVER_NAME + MAX_SIZE_DRIVER_LICENSE + MAX_SIZE_TAG_DATE, tibase.driver_info.ExpDate, MAX_SIZE_TAG_DATE);
+
+	//CRC
+	tmp8 = CRC_8BitsCompute(mcu_data, (11 + MAX_SIZE_DRIVER_NAME + MAX_SIZE_DRIVER_LICENSE + MAX_SIZE_TAG_DATE + MAX_SIZE_TAG_DATE));
+	mcu_data[11 + MAX_SIZE_DRIVER_NAME + MAX_SIZE_DRIVER_LICENSE + MAX_SIZE_TAG_DATE + MAX_SIZE_TAG_DATE] = tmp8;
+	rfid_send_msg(mcu_data, 1 + 11 + MAX_SIZE_DRIVER_NAME + MAX_SIZE_DRIVER_LICENSE + MAX_SIZE_TAG_DATE + MAX_SIZE_TAG_DATE);
+
+	if(GPS_READY == 1){
+		cam_setting_driver_info(tibase.driver_info.DriverName, tibase.driver_info.DriverLicense);
+	}
+}
+
+static void update_rfid_status(void){
+	u8 tmp8;
+	u16 tmp16;
+	u8 mcu_data[128];
+	mcu_data[0] = '>';   //0x1
+	mcu_data[1] = '>';
+	mcu_data[2] = 0x01;
+
+	//log_gps("UPDATE -> STATUS RFID DATA \n");
+
+	/* device status */
+	mcu_data[3] = GPS_Data.gps_status | ((u8)network_data.tcp_status << 1) | ((u8)network_data.internet_status << 2) | (ACC_STATUS << 3) | (((tibase.LoginStatus == STATUS_LOGIN) ? 1 : 0) << 4) | ((u8)tibase.over_speed_status << 5) | ((u8)tibase.over_driver_continue_status << 6) | (((network_data.sim_status == E_QL_SIM_STAT_READY) ? 1 : 0) << 7);
+	/* buzzer level */
+	mcu_data[4] = SystemSetting.data.BuzzerLevel;
+	/* slience mode */
+	mcu_data[5] = SystemSetting.data.SlienceMode;
+	//CRC
+	tmp8 = CRC_8BitsCompute(mcu_data, 6);
+	mcu_data[6] = tmp8;
+	rfid_send_msg(mcu_data, 7);
+	//log_system("UPDATE RFID DATA\n");
+}
+
+void get_mcu_devsetting(void){
+	u8 tmp8 = 0;
+	u16 tmp16 = sizeof(sys_setting);
+	u8 mcu_data[16];
+	mcu_data[0] = '>';   //0x1
+	mcu_data[1] = '>';
+	mcu_data[2] = 0x05;
+
+	log_system("GET DEVICE SETTING FROM MCU MEMORY \n");
+
+	mcu_data[3] = (tmp16 >> 8) & 0xFF;
+	mcu_data[4] =  tmp16 & 0xFF;
+
+	//CRC
+	tmp8 = CRC_8BitsCompute(mcu_data, 5);
+	mcu_data[5] = tmp8;
+	mcu_send_msg(mcu_data, 6);
+}
+
+u8 mcu_cfg_data[512];
+void update_mcu_devsetting(void){
+	u8 tmp8 = 0;
+	u16 msg_len = 0;
+	u16 tmp16 = sizeof(sys_setting);
+	u32 crc32 = 0;
+
+	if(SystemSetting.data.DeviceID == 0) return;
+
+	mcu_cfg_data[0] = '>';   //0x1
+	mcu_cfg_data[1] = '>';
+	mcu_cfg_data[2] = 0x04;
+
+	mcu_cfg_data[3] = ((tmp16 + 4) >> 8) & 0xFF;
+	mcu_cfg_data[4] =  (tmp16 + 4) & 0xFF;
+
+	msg_len = 5;
+
+	memcpy(mcu_cfg_data + msg_len, SystemSetting.bytes, tmp16);
+	msg_len = msg_len + tmp16;
+
+	crc32 = CRC32Software(SystemSetting.bytes, (long)tmp16);
+
+	mcu_cfg_data[msg_len] = (crc32 >> 24) & 0xFF;
+	msg_len = msg_len + 1;
+	mcu_cfg_data[msg_len] = (crc32 >> 16) & 0xFF;
+	msg_len = msg_len + 1;
+	mcu_cfg_data[msg_len] = (crc32 >> 8) & 0xFF;
+	msg_len = msg_len + 1;
+	mcu_cfg_data[msg_len] = crc32 & 0xFF;
+	msg_len = msg_len + 1;
+
+	//CRC
+	tmp8 = CRC_8BitsCompute(mcu_cfg_data, msg_len);
+	mcu_cfg_data[msg_len] = tmp8;
+	msg_len = msg_len + 1;
+
+	mcu_send_msg(mcu_cfg_data, msg_len);
+
+	log_system("STORE DEVICE SETTING TO MCU MEMORY CRC = %u, Len = %d \n", crc32, msg_len);
+}
+
+void update_mcu_gps_data(void){
+	u8 tmp8;
+	u16 tmp16;
+	u8 mcu_data[128];
+	mcu_data[0] = '>';   //0x1
+	mcu_data[1] = '>';
+	mcu_data[2] = 0x01;
+
+	log_gps("UPDATE -> GPS MCU DATA \n");
+
+	/* device status */
+	mcu_data[3] = GPS_Data.gps_status | ((u8)network_data.tcp_status << 1) | ((u8)network_data.internet_status << 2) | (((tibase.LoginStatus == STATUS_LOGIN) ? 1 : 0) << 3) | ((u8)tibase.over_speed_status << 4) | ((u8)tibase.over_driver_continue_status << 5);
+
+	/* sim status */
+	mcu_data[4] = network_data.sim_status;
+
+	/* obd type */
+	mcu_data[5] = SystemSetting.data.OBDType;
+
+	/* adc pull config */
+	mcu_data[6] = SystemSetting.data.AdcPulseCfg;
+
+	/* buzzer level */
+	mcu_data[7] = SystemSetting.data.BuzzerLevel;
+
+	/* slience mode */
+	mcu_data[8] = SystemSetting.data.SlienceMode;
+
+	mcu_data[9] = SystemSetting.data.taxi_mode;
+	mcu_data[10] =  0;
+
+	mcu_data[11] = (DeviceSetting.BauRate2 >> 24) & 0xFF;
+	mcu_data[12] = (DeviceSetting.BauRate2 >> 16) & 0xFF;
+	mcu_data[13] = (DeviceSetting.BauRate2 >> 8) & 0xFF;
+	mcu_data[14] = DeviceSetting.BauRate2 & 0xFF;
+
+	mcu_data[15] = (DeviceSetting.BauRate4 >> 24) & 0xFF;
+	mcu_data[16] = (DeviceSetting.BauRate4 >> 16) & 0xFF;
+	mcu_data[17] = (DeviceSetting.BauRate4 >> 8) & 0xFF;
+	mcu_data[18] = DeviceSetting.BauRate4 & 0xFF;
+
+	//CRC
+	tmp8 = CRC_8BitsCompute(mcu_data, 19);
+	mcu_data[19] = tmp8;
+	mcu_send_msg(mcu_data, 20);
+}
+
+char dbg_taxi[128];
+void mcu_report_data_parser(u8 * data){
+	u8 tmp0;
+	int tmp1, tmp2;
+	MCU_Data.MCU_Verison = data[0];
+
+	MCU_Data.main_power = (data[1] << 8) | data[2];
+
+	MCU_Data.bat_power = (data[3] << 8) | data[4];
+
+	MCU_Data.fuel_adc_in = (data[5] << 8) | data[6];
+
+	MCU_Data.Vout_power = (data[7] << 8) | data[8];
+
+	if(SystemSetting.data.taxi_mode == 1){
+		MCU_Data.counter_ir_1 = (data[9] << 8) | data[10];
+		MCU_Data.counter_ir_2 = (data[11] << 8) | data[12];
+	}else{
+		tmp1 = (data[9] << 8) | data[10]; //	MCU_Data.fuel_232_1 = (data[9] << 8) | data[10];
+		tmp2 = (data[11] << 8) | data[12];//	MCU_Data.fuel_232_2 = (data[11] << 8) | data[12];
+
+		if(SystemSetting.data.fuel_3_to_1 == 1){
+			tmp1 = MCU_Data.fuel_adc_in;
+			MCU_Data.fuel_adc_in = 0;
+		}else if(SystemSetting.data.fuel_2_to_1 == 1){
+			tmp1 = tmp2;
+			tmp2 = 0;
+		}
+
+		if(SystemSetting.data.fuel_3_to_2 == 1){
+			tmp2 = MCU_Data.fuel_adc_in;
+			MCU_Data.fuel_adc_in = 0;
+		}
+
+		/* filter ad value */
+		add_fuel_data(tmp1, tmp2);
+	}
+
+	//tibase.temperature = (data[14] << 8) | data[15];   //16    --    17    no data
+
+	MCU_Data.obd_data.connected = data[18] & 0x01;
+
+	MCU_Data.Hard_Acc = ((data[18] >> 1) & 0x01);
+
+	tmp0 = ((data[18] >> 2) & 0x01);
+
+	MCU_Data.Hard_Door = ((SystemSetting.data.DoorRevert == 1) ? !tmp0 : tmp0);
+
+	tmp0 = ((data[18] >> 3) & 0x01);
+
+	MCU_Data.Hard_Air = ((SystemSetting.data.AirRevert == 1) ? !tmp0 : tmp0);
+
+	MCU_Data.power_mode = (power_type)((data[18] >> 4) & 0x01);
+
+	MCU_Data.obd_data.typeOBD = data[19];
+
+	MCU_Data.obd_data.sp = data[20];//SPEED
+
+	MCU_Data.obd_data.temp = data[21];
+
+	MCU_Data.obd_data.rpm = (data[22] << 8) | data[23];//for gps info
+
+	MCU_Data.obd_data.p_fuel = (data[24] << 8) | data[25];
+
+	MCU_Data.obd_data.s_km = (data[26] << 24) | (data[27] << 16) | (data[28] << 8) | data[29];//ODO
+
+	MCU_Data.obd_data.s_fuel = (data[30] << 24) | (data[31] << 16) | (data[32] << 8) | data[33];//SOC
+
+	MCU_Data.obd_data.bat = (data[34] << 8) | data[35];
+
+	MCU_Data.obd_data.avg_econ_fuel = (data[36] << 8) | data[37];
+
+	MCU_Data.obd_data.econ_fuel = (data[38] << 8) | data[39];
+
+	MCU_Data.obd_data.p_load = data[40];//SOH
+
+//	log_system("SPEED -> %d, temp -> %d, RPM -> %d, Pfuel -> %d, s_km -> %u, s_fuel -> %d , bat -> %d, avg_econ_fuel-> %d, p_load -> %d",
+//	MCU_Data.obd_data.sp, MCU_Data.obd_data.temp, MCU_Data.obd_data.rpm, MCU_Data.obd_data.p_fuel, MCU_Data.obd_data.s_km, MCU_Data.obd_data.s_fuel, MCU_Data.obd_data.bat, MCU_Data.obd_data.avg_econ_fuel, MCU_Data.obd_data.p_load);
+
+	//log_gps("ACC %d - DOOR %d - AIR %d \n MCU VER : %d \n", MCU_Data.Hard_Acc, MCU_Data.Hard_Door, MCU_Data.Hard_Air, MCU_Data.MCU_Verison);
+	if((MCU_Data.power_mode == POWER_SAVE) && (MCU_Data.last_power_mode == POWER_BALANCE)){
+		GPS_Data.stop_time = 0;
+
+		if(MCU_Data.pwr_warning_delay_tm > 60){
+			MCU_Data.pwr_warning_delay_tm = 0;
+			if(SystemSetting.data.Phone_sos[0] == '0' && strlen(SystemSetting.data.Phone_sos) == 10){
+				char pw_warning[256];
+
+				if(GPS_Data.gps_status == 0){
+					sprintf(pw_warning, "Canh bao! Xe %s Mat nguon, Mat tin hieu GPS\0", DeviceSetting.NumberPlate);
+				}else{
+					sprintf(pw_warning, "Canh bao! Xe %s Mat nguon!!!\n https://www.google.com/maps?q=%.5f,%.5f\nTime: %02d:%02d:%02d %02d-%02d-%d\nSpeed: %.2f\0", DeviceSetting.NumberPlate,
+					GPS_Data.location.latitude, GPS_Data.location.longitude,GPS_Data.gps_time->tm_hour, GPS_Data.gps_time->tm_min, GPS_Data.gps_time->tm_sec, GPS_Data.gps_time->tm_mday, (GPS_Data.gps_time->tm_mon + 1), (GPS_Data.gps_time->tm_year + 1900), GPS_Data.gps_speed);
+				}
+
+				Send_SMS(SystemSetting.data.Phone_sos, pw_warning);
+			}
+		}
+	}
+
+	if(MCU_Data.Hard_Acc == 1){
+		if(MCU_Data.last_Hard_Acc == 0){
+			send_device_setting();
+		}
+
+		GPS_Data.no_acc_time = 0;
+	}
+
+	if((MCU_Data.Hard_Door == 1) && (MCU_Data.Last_Hard_Door == 0)){
+		send_realtime_data();
+	}
+	MCU_Data.Last_Hard_Door = MCU_Data.Hard_Door;
+
+	MCU_Data.last_Hard_Acc = MCU_Data.Hard_Acc;
+	MCU_Data.last_power_mode = MCU_Data.power_mode;
+
+	/* taxi GSM */
+	if(SystemSetting.data.taxi_mode == 1){
+		MCU_Data.hirring_local_state = data[13];
+		MCU_Data.hirring_sensor_1 = data[14];
+		MCU_Data.hirring_sensor_2 = data[15];
+		MCU_Data.use_release_button = data[16];
+		tibase.ti_hirring_sensor_state = MCU_Data.hirring_sensor_state = (MCU_Data.hirring_sensor_1 | MCU_Data.hirring_sensor_2);
+	}
+}
+
+int write_gps_data(void){
+	u8 door_state = 0;
+	u8 air_state = 0;
+	door_state = ((SystemSetting.data.taxi_mode == 1) ? MCU_Data.hirring_sensor_state : MCU_Data.Hard_Door);
+	air_state = ((SystemSetting.data.taxi_mode == 1) ? MCU_Data.hirring_local_state : MCU_Data.Hard_Air);
+
+	trip_data_typedef GPS;
+	memset(&GPS, 0x0, sizeof(GPS));
+	u8 sim_status = 0;
+	if(E_QL_SIM_STAT_READY == network_data.sim_status){
+		sim_status = 1;
+	}
+
+	GPS.d_time = GPS_Data.gps_time;
+	GPS.status_1 = GPS_Data.gps_status | (ACC_STATUS << 1) | (door_state << 2) | (air_state << 3) | (POWER_STATUS << 4) | (((tibase.LoginStatus == STATUS_LOGIN) ? 1 : 0) << 5) |((u8)tibase.over_speed_status << 6) | ((u8)tibase.over_driver_continue_status << 7);
+	GPS.status_2 = network_data.net_work_info.radio_tech | (MCU_Data.Hard_Acc << 4) | ((u8)LSM_Status << 5) | (sim_status << 7);
+	GPS.tm_stamp = (u32)GPS_Data.timestamp;
+	GPS.location.latitude = GPS_Data.location.latitude;
+	GPS.location.longitude = GPS_Data.location.longitude;
+	GPS.angle = (u16)GPS_Data.bearing;
+	GPS.pulse_speed = GPS_Data.svs_in_use | ((u8)network_data.tcp_status << 7);
+	GPS.speed_limit = DeviceSetting.SpeedLimit;
+	GPS.gps_distance = (tibase.GPSMeter / 10);
+	GPS.trip_hirring_sensor_status = tibase.ti_hirring_sensor_state;//GPS.temperature = tibase.temperature;
+	GPS.fuel1 = MCU_Data.fuel_232_1;
+	GPS.fuel2 = MCU_Data.fuel_232_2;
+	GPS.fuel3 = MCU_Data.fuel_adc_in;
+	GPS.tagUID = tibase.UID;
+	GPS.GSMStreng = network_data.net_work_info.signal_strength;
+	GPS.main_power = MCU_Data.main_power;
+	GPS.batery_power = MCU_Data.bat_power;
+	GPS.frqsend = GPS_Data.freq_send;
+	GPS.speed1 = GPS_Data.speeds[0];
+	GPS.speed2 = GPS_Data.speeds[1];
+	GPS.speed3 = GPS_Data.speeds[2];
+	GPS.speed4 = GPS_Data.speeds[3];
+	GPS.speed5 = GPS_Data.speeds[4];
+	GPS.speed6 = GPS_Data.speeds[5];
+	GPS.speed7 = GPS_Data.speeds[6];
+	GPS.speed8 = GPS_Data.speeds[7];
+	GPS.speed9 = GPS_Data.speeds[8];
+	GPS.speed10 = GPS_Data.speeds[9];
+	GPS.FlgSend = 0;
+
+	return insert_TripInfo(GPS);
+}
+
+void compress_locations(u8* output, loc_def *locs, u8 nLoc){
+	u8 i = 0;
+	float deltalat = 0;
+	float deltalong = 0;
+	s16 dlt,dln;
+
+	for(i = (nLoc - 1); i > 0; i--){
+		deltalat = locs[i].latitude  - locs[i - 1].latitude;
+		deltalong = locs[i].longitude - locs[i - 1].longitude;
+
+		if(deltalat > 0.032000) deltalat = 0.0;
+		if(deltalong > 0.032000) deltalong = 0.0;
+
+		dlt = (s16)(deltalat * 1000000);
+		dln = (s16)(deltalong * 1000000);
+
+		output[(i * 4) - 1] = (u8)((dlt >> 8) & 0xFF);
+		output[(i * 4) - 2] = (u8)(dlt & 0xFF);
+
+		output[(i * 4) - 3] = (u8)((dln >> 8) & 0xFF);
+		output[(i * 4) - 4] = (u8)(dln & 0xFF);
+	}
+}
+
+void decompress_locations(u8* input, loc_def *locs, loc_def end_point, u8 nLoc){
+	u8 i = 0;
+	s16 dlt,dln;
+	loc_def this_point = end_point;
+	loc_def tmp;
+
+	for(i = (nLoc - 1); i > 0; i--){
+		dlt = (s16)((input[(i * 4) - 1] << 8) | (input[(i * 4) - 2]));
+		tmp.latitude = this_point.latitude - ((double)dlt / (double)1000000);
+
+
+		dln = (s16)((input[(i * 4) - 3] << 8) | (input[(i * 4) - 4]));
+		tmp.longitude = this_point.longitude - ((double)dln / (double)1000000);
+
+		//log_gps("DECOMPRESS -> %d    %f, %f \n", i, tmp.latitude, tmp.longitude);
+
+		locs[i - 1] = tmp;
+		this_point = tmp;
+	}
+}
+
+static void SendOverSpeed(void){
+	tcp_mail_queue_typedef buf;
+	u16 tcp_len;
+	u8 crc = 0;
+
+	/* Frame header */
+	buf.data[0] = 0xF0;
+	buf.data[1] = 0xF0;
+	/* Device ID */
+	buf.data[2] =  SystemSetting.data.DeviceID & 0xFF;
+	buf.data[3] = (SystemSetting.data.DeviceID >> 8) & 0xFF;
+	buf.data[4] = (SystemSetting.data.DeviceID >> 16) & 0xFF;
+	buf.data[5] = (SystemSetting.data.DeviceID >> 24) & 0xFF;
+	buf.data[6] = (SystemSetting.data.DeviceID >> 32) & 0xFF;
+	buf.data[7] = (SystemSetting.data.DeviceID >> 40) & 0xFF;
+	buf.data[8] = (SystemSetting.data.DeviceID >> 48) & 0xFF;
+	buf.data[9] = (SystemSetting.data.DeviceID >> 56) & 0xFF;
+	/* Version */
+	buf.data[10] = OVER_SPEED;
+
+	/* Average speed  */
+	buf.data[13] = (GPS_Data.ovSpeedData.speeds / (GPS_Data.ovSpeedData.ovSpeedHold + 1));
+
+	/* Date Time*/
+	*(int32_t*)(buf.data + 14) = GPS_Data.timestamp;
+	/* Latitude */
+	*(float*)(buf.data + 18) = GPS_Data.location.latitude;
+	/* longitude */
+	*(float*)(buf.data + 22) = GPS_Data.location.longitude;
+
+	buf.data[26] = tibase.UID & 0xFF;
+	buf.data[27] = (tibase.UID >> 8)  & 0xFF;
+	buf.data[28] = (tibase.UID >> 16) & 0xFF;
+	buf.data[29] = (tibase.UID >> 24) & 0xFF;
+	buf.data[30] = (tibase.UID >> 32) & 0xFF;
+	buf.data[31] = (tibase.UID >> 40) & 0xFF;
+	buf.data[32] = (tibase.UID >> 48) & 0xFF;
+	buf.data[33] = (tibase.UID >> 56) & 0xFF;
+
+	/* Length data */
+	tcp_len = 35;
+	buf.data[11] = tcp_len & 0xFF;
+	buf.data[12] = tcp_len >> 8;
+
+	/* CRC */
+	crc = CRC_8BitsCompute(buf.data, 34);
+	buf.data[34] = crc;
+
+	buf.size = tcp_len;
+	buf.Data_Type = OVER_SPEED;
+	buf.trace = GPS_Data.timestamp;
+
+	Push_TCP_Data(buf);
+}
+
+#if (USE_ENCRYPT == 1)
+	u8 data_raw[256];
+	void send_realtime_data(void){
+		u8 idx = 0;
+		tcp_mail_queue_typedef buf;
+
+		s16 tmps16 = 0;
+		u8 crc = 0;
+		u16 tmp16 = 0;
+		u32 tmp32 = 0;
+		u64 tmp64 = 0;
+		u16 tcp_len = 136;
+		u8 svr_status = (u8)network_data.tcp_status;
+
+		/* Frame header */
+		data_raw[0] = 0xF1;
+		data_raw[1] = 0xF1;
+
+		/* Device ID */
+		data_raw[2] =  SystemSetting.data.DeviceID & 0xFF;
+		data_raw[3] = (SystemSetting.data.DeviceID >> 8) & 0xFF;
+		data_raw[4] = (SystemSetting.data.DeviceID >> 16) & 0xFF;
+		data_raw[5] = (SystemSetting.data.DeviceID >> 24) & 0xFF;
+		data_raw[6] = (SystemSetting.data.DeviceID >> 32) & 0xFF;
+		data_raw[7] = (SystemSetting.data.DeviceID >> 40) & 0xFF;
+		data_raw[8] = (SystemSetting.data.DeviceID >> 48) & 0xFF;
+		data_raw[9] = (SystemSetting.data.DeviceID >> 56) & 0xFF;
+
+		/* Date Time*/
+		*(int32_t*)(data_raw + 10) = GPS_Data.timestamp;
+
+		data_raw[14] = tcp_len & 0xFF;
+		data_raw[15] = tcp_len >> 8;
+
+		/* Version */
+		data_raw[16] = REAL_TIME_DATA;
+		/* Status of device  GPS - ACC - DOOR - AIR  - power mode (0 - nomal, 1 low pw) - LOGIN - OVSPEED - OV-LXLT */
+		data_raw[17] = GPS_Data.gps_status | (ACC_STATUS << 1) | (MCU_Data.Hard_Door << 2) | (MCU_Data.Hard_Air << 3) | (POWER_STATUS << 4) | (((tibase.LoginStatus == STATUS_LOGIN) ? 1 : 0) << 5) |((u8)tibase.over_speed_status << 6) | ((u8)tibase.over_driver_continue_status << 7);
+		data_raw[18] = (u8)network_data.net_work_info.radio_tech | (MCU_Data.Hard_Acc << 4) | ((u8)LSM_Status << 5);
+		/* Latitude */
+		*(float*)(data_raw + 19) = GPS_Data.location.latitude;
+		/* longitude */
+		*(float*)(data_raw + 23) = GPS_Data.location.longitude;
+		/* Course */
+		tmp16 = (u16)GPS_Data.bearing;
+		data_raw[27] =  tmp16 & 0xFF;
+		data_raw[28] = tmp16 >> 8;
+		/* Speed */
+		data_raw[29] = (u8)(GPS_Data.gps_speed);
+		/* gps meter */
+		tmp16 = (tibase.GPSMeter / 100);
+		data_raw[30] = tmp16 & 0xFF;
+		data_raw[31] = tmp16 >> 8;
+
+		/* pulse speed */
+		data_raw[32] = GPS_Data.svs_in_use | ((u8)network_data.tcp_status << 7);
+		/* temp */
+		data_raw[33] = tibase.temperature & 0xFF;
+		data_raw[34] = tibase.temperature >> 8;
+
+		/* main power value */
+		data_raw[35] = MCU_Data.main_power & 0xFF;
+		data_raw[36] = MCU_Data.main_power >> 8;
+
+		/* battery power value */
+		data_raw[37] = MCU_Data.bat_power & 0xFF;
+		data_raw[38] = MCU_Data.bat_power >> 8;
+
+		/* max speed */
+		data_raw[39] = DeviceSetting.SpeedLimit;
+		/* Signal Strength */
+		data_raw[40] = network_data.net_work_info.signal_strength;
+		/* Fuel 1 */
+		data_raw[41] = MCU_Data.fuel_232_1 & 0xFF;
+		data_raw[42] = MCU_Data.fuel_232_1 >> 8;
+		/* Fuel 2 */
+		data_raw[43] = MCU_Data.fuel_232_2 & 0xFF;
+		data_raw[44] = MCU_Data.fuel_232_2 >> 8;
+		/* Fuel 3 */
+		data_raw[45] = MCU_Data.fuel_adc_in & 0xFF;
+		data_raw[46] = MCU_Data.fuel_adc_in >> 8;
+
+		/* ID of rfid card */
+		tmp64 = tibase.UID;
+		data_raw[47] = tmp64 & 0xFF;
+		data_raw[48] = (tmp64 >> 8)  & 0xFF;
+		data_raw[49] = (tmp64 >> 16) & 0xFF;
+		data_raw[50] = (tmp64 >> 24) & 0xFF;
+		data_raw[51] = (tmp64 >> 32) & 0xFF;
+		data_raw[52] = (tmp64 >> 40) & 0xFF;
+		data_raw[53] = (tmp64 >> 48) & 0xFF;
+		data_raw[54] = (tmp64 >> 56) & 0xFF;
+
+		data_raw[55] = GPS_Data.freq_send & 0xFF;
+		data_raw[56] = GPS_Data.freq_send >> 8;
+
+		/* speeds over seconds */
+		memcpy(data_raw + 57, (u8*)GPS_Data.speeds, SystemSetting.data.FrqRun);
+		/* locations per seconds */
+		compress_locations(data_raw + 67, GPS_Data.locations, SystemSetting.data.FrqRun); //LENGHT = 9 x4 = 36 byte
+
+		/**************************************************/
+
+		/* minute of driver continue */
+		tmp16 = (get_run_time() / 60);
+		data_raw[103] = tmp16 & 0xFF;
+		data_raw[104] = tmp16 >> 8;
+
+		/* minute of driver stop */
+		tmp16 = (get_stop_time() / 60);
+		data_raw[105] = tmp16 & 0xFF;
+		data_raw[106] = tmp16 >> 8;
+
+		/* minute of driver in day */
+		tmp16 = (tibase.DriverInday / 60);
+		data_raw[107] = tmp16 & 0xFF;
+		data_raw[108] = tmp16 >> 8;
+
+		/* count number of park */
+		data_raw[109] = tibase.ParkCount;
+
+		/* count number of over speed */
+		data_raw[110] = tibase.OverSpeedCount;
+
+		/* count number of over speed */
+		data_raw[111] = tibase.DriveContinueCount;
+
+		/* count number of over speed */
+		data_raw[112] = tibase.OverDriveContinueCount;
+
+		/* OBD connect */
+		data_raw[113] = MCU_Data.obd_data.connected;
+
+		/* Vehicle speed */
+		data_raw[114] = MCU_Data.obd_data.sp;
+
+		/* cooling water temperature */
+		data_raw[115] = MCU_Data.obd_data.temp;
+
+		/* engine RPM */
+		data_raw[116] = MCU_Data.obd_data.rpm & 0xFF;
+		data_raw[117] = MCU_Data.obd_data.rpm >> 8;
+
+		data_raw[118] = MCU_Data.obd_data.p_fuel & 0xFF;
+		data_raw[119] = MCU_Data.obd_data.p_fuel >> 8;
+
+		/* total km */
+		data_raw[120] =  MCU_Data.obd_data.s_km & 0xFF;
+		data_raw[121] = (MCU_Data.obd_data.s_km >> 8) & 0xFF;
+		data_raw[122] = (MCU_Data.obd_data.s_km >> 16) & 0xFF;
+		data_raw[123] = (MCU_Data.obd_data.s_km >> 24) & 0xFF;
+
+		/* total fuel */
+		data_raw[124] =  MCU_Data.obd_data.s_fuel & 0xFF;
+		data_raw[125] = (MCU_Data.obd_data.s_fuel >> 8) & 0xFF;
+		data_raw[126] = (MCU_Data.obd_data.s_fuel >> 16) & 0xFF;
+		data_raw[127] = (MCU_Data.obd_data.s_fuel >> 24) & 0xFF;
+
+		/* accu voltage */
+		data_raw[128] = MCU_Data.obd_data.bat & 0xFF;
+		data_raw[129] = MCU_Data.obd_data.bat >> 8;
+
+		/* avg econ fuel */
+		data_raw[130] = MCU_Data.obd_data.avg_econ_fuel & 0xFF;
+		data_raw[131] = MCU_Data.obd_data.avg_econ_fuel >> 8;
+
+		data_raw[132] = MCU_Data.obd_data.econ_fuel & 0xFF;
+		data_raw[133] = MCU_Data.obd_data.econ_fuel >> 8;
+
+		/* power load */
+		data_raw[134] = MCU_Data.obd_data.p_load;
+
+		memcpy(buf.data, data_raw, tcp_len);
+
+		/* encrypt data */
+		encrypt_GPSdata(DeviceSetting.IMEI, GPS_Data.timestamp, (data_raw + 16), (buf.data + 16), (tcp_len - 17));
+
+		/* CRC */
+		crc = CRC_8BitsCompute(buf.data, 135);
+		buf.data[135] = crc;
+
+//		printf("TIME -> %u /n", GPS_Data.timestamp);
+//		printf("RAW /n");
+//		hex_log_debug(data_raw, tcp_len - 1);
+//
+//		printf("ENCRYPT /n");
+//		hex_log_debug(buf.data, tcp_len);
+
+		buf.size = tcp_len;
+		buf.Data_Type = REAL_TIME_DATA;
+		buf.trace = GPS_Data.timestamp;
+
+		Push_TCP_Data(buf);
+	}
+#else
+	void send_realtime_data(void){
+		u8 idx = 0;
+		tcp_mail_queue_typedef buf;
+		s16 tmps16 = 0;
+		u8 crc = 0;
+		u16 tmp16 = 0;
+		u32 tmp32 = 0;
+		u64 tmp64 = 0;
+		u16 tcp_len = 0;
+		u8 sim_status = 0;
+		u8 door_state = 0;
+		u8 air_state = 0;
+
+		if(E_QL_SIM_STAT_READY == network_data.sim_status){
+			sim_status = 1;
+		}
+		door_state = ((SystemSetting.data.taxi_mode == 1) ? MCU_Data.hirring_sensor_state : MCU_Data.Hard_Door);
+		air_state = ((SystemSetting.data.taxi_mode == 1) ? MCU_Data.hirring_local_state : MCU_Data.Hard_Air);
+
+		/* Frame header */
+		buf.data[0] = 0xF0;
+		buf.data[1] = 0xF0;
+		/* Device ID */
+		buf.data[2] =  SystemSetting.data.DeviceID & 0xFF;
+		buf.data[3] = (SystemSetting.data.DeviceID >> 8) & 0xFF;
+		buf.data[4] = (SystemSetting.data.DeviceID >> 16) & 0xFF;
+		buf.data[5] = (SystemSetting.data.DeviceID >> 24) & 0xFF;
+		buf.data[6] = (SystemSetting.data.DeviceID >> 32) & 0xFF;
+		buf.data[7] = (SystemSetting.data.DeviceID >> 40) & 0xFF;
+		buf.data[8] = (SystemSetting.data.DeviceID >> 48) & 0xFF;
+		buf.data[9] = (SystemSetting.data.DeviceID >> 56) & 0xFF;
+		/* Version */
+		buf.data[10] = REAL_TIME_DATA;
+		/* Status of device  GPS - ACC - DOOR - AIR  - power mode (0 - nomal, 1 low pw) - LOGIN - OVSPEED - OV-LXLT */
+		buf.data[13] = GPS_Data.gps_status | (ACC_STATUS << 1) | (door_state << 2) | (air_state << 3) | (POWER_STATUS << 4) | (((tibase.LoginStatus == STATUS_LOGIN) ? 1 : 0) << 5) |((u8)tibase.over_speed_status << 6) | ((u8)tibase.over_driver_continue_status << 7);
+		buf.data[14] = (u8)network_data.net_work_info.radio_tech | (MCU_Data.Hard_Acc << 4) | ((u8)LSM_Status << 5) | (sim_status << 7);
+		/* Date Time*/
+		*(int32_t*)(buf.data + 15) = GPS_Data.timestamp;
+		/* Latitude */
+		*(float*)(buf.data + 19) = GPS_Data.location.latitude;
+		/* longitude */
+		*(float*)(buf.data + 23) = GPS_Data.location.longitude;
+		/* Course */
+		tmp16 = (u16)GPS_Data.bearing;
+		buf.data[27] =  tmp16 & 0xFF;
+		buf.data[28] = tmp16 >> 8;
+		/* Speed */
+		buf.data[29] = (u8)(GPS_Data.gps_speed);
+		/* gps meter */
+		tmp16 = (tibase.GPSMeter / 100);
+		buf.data[30] = tmp16 & 0xFF;
+		buf.data[31] = tmp16 >> 8;
+
+		/* pulse speed */
+		buf.data[32] = (GPS_Data.svs_in_use & 0x1F) | (pw_camera_status << 6) | ((u8)network_data.tcp_status << 7);
+		/* temp */
+		buf.data[33] = 0;
+		buf.data[34] = 0;
+
+		/* main power value */
+		buf.data[35] = MCU_Data.main_power & 0xFF;
+		buf.data[36] = MCU_Data.main_power >> 8;
+
+		/* battery power value */
+		buf.data[37] = MCU_Data.bat_power & 0xFF;
+		buf.data[38] = MCU_Data.bat_power >> 8;
+
+		/* max speed */
+		buf.data[39] = DeviceSetting.SpeedLimit;
+		/* Signal Strength */
+		buf.data[40] = network_data.net_work_info.signal_strength;
+
+		if(SystemSetting.data.taxi_mode == 1){
+			/* Fuel 1 */
+			buf.data[41] = GPS_Data.svs_in_snd & 0xFF;
+			buf.data[42] = GPS_Data.svs_in_snd >> 8;
+		}else{
+			/* Fuel 1 */
+			buf.data[41] = MCU_Data.fuel_232_1 & 0xFF;
+			buf.data[42] = MCU_Data.fuel_232_1 >> 8;
+		}
+
+		/* Fuel 2 */
+		buf.data[43] = MCU_Data.fuel_232_2 & 0xFF;
+		buf.data[44] = MCU_Data.fuel_232_2 >> 8;
+		/* Fuel 3 */
+		buf.data[45] = MCU_Data.fuel_adc_in & 0xFF;
+		buf.data[46] = MCU_Data.fuel_adc_in >> 8;
+
+		/* ID of rfid card */
+		tmp64 = tibase.UID;
+		buf.data[47] = tmp64 & 0xFF;
+		buf.data[48] = (tmp64 >> 8)  & 0xFF;
+		buf.data[49] = (tmp64 >> 16) & 0xFF;
+		buf.data[50] = (tmp64 >> 24) & 0xFF;
+		buf.data[51] = (tmp64 >> 32) & 0xFF;
+		buf.data[52] = (tmp64 >> 40) & 0xFF;
+		buf.data[53] = (tmp64 >> 48) & 0xFF;
+		buf.data[54] = (tmp64 >> 56) & 0xFF;
+
+		buf.data[55] = GPS_Data.freq_send & 0xFF;
+		buf.data[56] = GPS_Data.freq_send >> 8;
+
+		/* speeds over seconds */
+		memcpy(buf.data + 57, (u8*)GPS_Data.speeds, SystemSetting.data.FrqRun);
+		/* locations per seconds */
+		compress_locations(buf.data + 67, GPS_Data.locations, SystemSetting.data.FrqRun); //LENGHT = 9 x4 = 36 byte
+
+		/**************************************************/
+
+		/* minute of driver continue */
+		tmp16 = (get_run_time() / 60);
+		buf.data[103] = tmp16 & 0xFF;
+		buf.data[104] = tmp16 >> 8;
+
+		/* minute of driver stop */
+		tmp16 = (get_stop_time() / 60);
+		buf.data[105] = tmp16 & 0xFF;
+		buf.data[106] = tmp16 >> 8;
+
+		/* minute of driver in day */
+		tmp16 = (tibase.DriverInday / 60);
+		buf.data[107] = tmp16 & 0xFF;
+		buf.data[108] = tmp16 >> 8;
+
+		/* count number of park */
+		buf.data[109] = tibase.ParkCount;
+
+		/* count number of over speed */
+		buf.data[110] = tibase.OverSpeedCount;
+
+		/* count number of over speed */
+		buf.data[111] = tibase.DriveContinueCount;
+
+		/* count number of over speed */
+		buf.data[112] = tibase.OverDriveContinueCount;
+
+		/* OBD connect */
+		buf.data[113] = MCU_Data.obd_data.connected;//ok
+
+		/* Vehicle speed */
+		buf.data[114] = MCU_Data.obd_data.sp;//toc do obd taxi xanh
+
+		/* cooling water temperature */
+		buf.data[115] = MCU_Data.obd_data.temp;
+
+		/* engine RPM */
+		buf.data[116] = MCU_Data.obd_data.rpm & 0xFF;
+		buf.data[117] = MCU_Data.obd_data.rpm >> 8;
+
+		buf.data[118] = MCU_Data.obd_data.p_fuel & 0xFF;
+		buf.data[119] = MCU_Data.obd_data.p_fuel >> 8;
+
+		/* total km */
+		buf.data[120] =  MCU_Data.obd_data.s_km & 0xFF;   //ODO obd taxi xanh
+		buf.data[121] = (MCU_Data.obd_data.s_km >> 8) & 0xFF;
+		buf.data[122] = (MCU_Data.obd_data.s_km >> 16) & 0xFF;
+		buf.data[123] = (MCU_Data.obd_data.s_km >> 24) & 0xFF;
+
+		/* total fuel */
+		buf.data[124] =  MCU_Data.obd_data.s_fuel & 0xFF;      ///SOC
+		buf.data[125] = (MCU_Data.obd_data.s_fuel >> 8) & 0xFF;
+		buf.data[126] = (MCU_Data.obd_data.s_fuel >> 16) & 0xFF;
+		buf.data[127] = (MCU_Data.obd_data.s_fuel >> 24) & 0xFF;
+
+		/* accu voltage */
+		buf.data[128] = MCU_Data.obd_data.bat & 0xFF;
+		buf.data[129] = MCU_Data.obd_data.bat >> 8;
+
+		/* avg econ fuel */
+		buf.data[130] = MCU_Data.obd_data.avg_econ_fuel & 0xFF;
+		buf.data[131] = MCU_Data.obd_data.avg_econ_fuel >> 8;
+
+		buf.data[132] = MCU_Data.obd_data.econ_fuel & 0xFF;
+		buf.data[133] = MCU_Data.obd_data.econ_fuel >> 8;
+
+		/* power load */
+		buf.data[134] = MCU_Data.obd_data.p_load;   //SOH
+
+		/* Length data */
+		tcp_len = 136;
+		buf.data[11] = tcp_len & 0xFF;
+		buf.data[12] = tcp_len >> 8;
+
+		/* CRC */
+		crc = CRC_8BitsCompute(buf.data, 135);
+		buf.data[135] = crc;
+
+		buf.size = tcp_len;
+		buf.Data_Type = REAL_TIME_DATA;
+		buf.trace = GPS_Data.timestamp;
+
+		Push_TCP_Data(buf);
+	}
+#endif /* USE_ENCRYPT */
+
+u8 cam_sn_list[128] = {0};
+void send_device_setting(void){
+	u8 idx = 0;
+	tcp_mail_queue_typedef buf;
+	char str_motion_value[32];
+	u8 crc = 0, tmp = 0;
+	u16 tcp_len = 0;
+	u16 tmp16 = 0;
+	u32 tmp32 = 0;
+	int rs1 = 0, rs2 = 0, rs3 = 0, rs4 = 0;
+
+	if(camera_detect(11) == 0){
+		rs1 = 1;
+	}
+
+	if(camera_detect(12) == 0){
+		rs2 = 1;
+	}
+
+	if(camera_detect(13) == 0){
+		rs3 = 1;
+	}
+
+	if(camera_detect(14) == 0){
+		rs4 = 1;
+	}
+
+	/* Frame header */
+	buf.data[0] = 0xF0;
+	buf.data[1] = 0xF0;
+	/* Device ID */
+	buf.data[2] =  SystemSetting.data.DeviceID & 0xFF;
+	buf.data[3] = (SystemSetting.data.DeviceID >> 8) & 0xFF;
+	buf.data[4] = (SystemSetting.data.DeviceID >> 16) & 0xFF;
+	buf.data[5] = (SystemSetting.data.DeviceID >> 24) & 0xFF;
+	buf.data[6] = (SystemSetting.data.DeviceID >> 32) & 0xFF;
+	buf.data[7] = (SystemSetting.data.DeviceID >> 40) & 0xFF;
+	buf.data[8] = (SystemSetting.data.DeviceID >> 48) & 0xFF;
+	buf.data[9] = (SystemSetting.data.DeviceID >> 56) & 0xFF;
+	/* Version */
+	buf.data[10] = DEVICE_SETTING;
+
+	buf.data[13] = APP_VERSION;
+
+	buf.data[14] = MCU_Data.MCU_Verison;
+
+	buf.data[15] = MCU_Data.RFID_Verison;
+
+	buf.data[16] = MCU_Data.ID_RFID & 0xFF;
+	buf.data[17] = (MCU_Data.ID_RFID >> 8) & 0xFF;
+	buf.data[18] = (MCU_Data.ID_RFID >> 16) & 0xFF;
+	buf.data[19] = (MCU_Data.ID_RFID >> 24) & 0xFF;
+
+	buf.data[20] = SystemSetting.data.OBDType;
+
+	buf.data[21] = SystemSetting.data.AdcPulseCfg;
+
+	buf.data[22] = SystemSetting.data.BuzzerLevel;
+
+	buf.data[23] = SystemSetting.data.SpeakerVolume;
+
+	buf.data[24] = SystemSetting.data.RunLevel;
+
+	buf.data[25] = SystemSetting.data.AccMode;
+
+	buf.data[26] = SystemSetting.data.DoorRevert;
+
+	buf.data[27] = SystemSetting.data.AirRevert;
+
+	buf.data[28] = SystemSetting.data.taxi_mode;//DeviceSetting.CarType;
+
+	/* time send gps when stop */
+	buf.data[29] = SystemSetting.data.FrqRun;
+
+if(SystemSetting.data.taxi_mode == 1){
+	buf.data[30] = SystemSetting.data.SlienceMode;
+}else{
+	buf.data[30] = (rs1 | (rs2 << 1) | (rs3 << 2) | (rs4 << 3));//camera ping connected
+}
+	/* camera number 0~8 */
+	buf.data[31] = GetCameraNumber();
+
+	/* time send gps when stop */
+	buf.data[32] = SystemSetting.data.FrqStop & 0xFF;
+	buf.data[33] = (SystemSetting.data.FrqStop >> 8) & 0xFF;
+
+	/* time capture image when move */
+	buf.data[34] =  SystemSetting.data.FrqCaptureRun & 0xFF;
+	buf.data[35] = (SystemSetting.data.FrqCaptureRun >> 8) & 0xFF;
+
+	/* time capture image when stop/park */
+	buf.data[36] =  SystemSetting.data.FrqCaptureStop & 0xFF;
+	buf.data[37] = (SystemSetting.data.FrqCaptureStop >> 8) & 0xFF;
+if(SystemSetting.data.taxi_mode == 1){
+	tmp16 = MCU_Data.use_release_button;
+	buf.data[38] =  tmp16 & 0xFF;
+	buf.data[39] = (tmp16>> 8) & 0xFF;
+}else{
+	/* time off camera when park */
+	buf.data[38] =  SystemSetting.data.time_pw_off_camera_when_park & 0xFF;
+	buf.data[39] = (SystemSetting.data.time_pw_off_camera_when_park >> 8) & 0xFF;
+}
+	/* baurate 2 bps */
+	tmp32 = !SystemSetting.data.disable_pw_off_cam_when_park;
+	buf.data[40] = tmp32 & 0xFF;
+	buf.data[41] = (tmp32 >> 8) & 0xFF;
+	buf.data[42] = (tmp32 >> 16) & 0xFF;
+	buf.data[43] = (tmp32 >> 24) & 0xFF;
+
+	/* baurate 2 bps */
+//	buf.data[40] = DeviceSetting.BauRate2 & 0xFF;
+//	buf.data[41] = (DeviceSetting.BauRate2 >> 8) & 0xFF;
+//	buf.data[42] = (DeviceSetting.BauRate2 >> 16) & 0xFF;
+//	buf.data[43] = (DeviceSetting.BauRate2 >> 24) & 0xFF;
+
+
+	tmp32 = pw_camera_status;
+	buf.data[44] = tmp32 & 0xFF;
+	buf.data[45] = (tmp32 >> 8) & 0xFF;
+	buf.data[46] = (tmp32 >> 16) & 0xFF;
+	buf.data[47] = (tmp32 >> 24) & 0xFF;
+
+	/* baurate 1 bps */
+//	buf.data[44] = DeviceSetting.BauRate4 & 0xFF;
+//	buf.data[45] = (DeviceSetting.BauRate4 >> 8) & 0xFF;
+//	buf.data[46] = (DeviceSetting.BauRate4 >> 16) & 0xFF;
+//	buf.data[47] = (DeviceSetting.BauRate4 >> 24) & 0xFF;
+
+	/* Early warning time for driver continue */
+	buf.data[48] =  SystemSetting.data.DrvForeWarningTime & 0xFF;
+	buf.data[49] = (SystemSetting.data.DrvForeWarningTime >> 8) & 0xFF;
+
+	/* time set 1 time stop/parking */
+	buf.data[50] =  DeviceSetting.FuelManualMode & 0xFF;
+	buf.data[51] = (DeviceSetting.FuelManualMode >> 8) & 0xFF;
+
+	/* reserved */
+	buf.data[52] = (SystemSetting.data.disable_audio) | (SystemSetting.data.disable_cam << 1) | (SystemSetting.data.dis_sys_rst_when_dis_cam << 2) | (SystemSetting.data.disable_capture << 3) | (SystemSetting.data.disable_camera_roaming_mode << 4);
+
+	buf.data[53] = (SystemSetting.data.time_reset_when_disconnect >> 8) & 0xFF;
+	buf.data[54] = (SystemSetting.data.time_reset_when_disconnect >> 8) & 0xFF;
+
+	buf.data[55] = SystemSetting.data.filter_level;
+
+	buf.data[56] = MobileCountryCode & 0xFF;
+	buf.data[57] = (MobileCountryCode >> 8) & 0xFF;
+
+	buf.data[58] = 0;
+	buf.data[59] = 0;
+	buf.data[60] = 0;
+	buf.data[61] = 0;
+
+	/* port - tcp server */
+	buf.data[62] = SystemSetting.data.port & 0xFF;
+	buf.data[63] = (SystemSetting.data.port >> 8) & 0xFF;
+	tcp_len = 64;
+
+	/* domain - tcp server */
+	tmp = strlen(SystemSetting.data.domain);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.domain, tmp);
+	tcp_len += tmp;
+if(SystemSetting.data.taxi_mode == 1){
+	/* device manufacture date */
+	tmp = strlen(ir_led_info);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, ir_led_info, tmp);
+	tcp_len += tmp;
+}else{
+	/* device manufacture date */
+	tmp = strlen(DeviceSetting.ManufactureDate);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, DeviceSetting.ManufactureDate, tmp);
+	tcp_len += tmp;
+}
+
+	/* device update firmware - soft ware */
+	tmp = strlen(DeviceSetting.IMEI);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, DeviceSetting.IMEI, tmp);
+	tcp_len += tmp;
+
+	/* password setting device */
+	tmp = strlen(SystemSetting.data.PassWord);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.PassWord, tmp);
+	tcp_len += tmp;
+
+	/* number plate */
+	tmp = strlen(DeviceSetting.NumberPlate);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, DeviceSetting.NumberPlate, tmp);
+	tcp_len += tmp;
+
+	/* URL download firmware pack */
+	tmp = strlen(SystemSetting.data.update_fw_url);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.update_fw_url, tmp);
+	tcp_len += tmp;
+if(SystemSetting.data.taxi_mode == 1){
+	/* GPS info */
+	tmp = strlen(svs_info);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, svs_info, tmp);
+	tcp_len += tmp;
+}else{
+	/* URL upload image to server */
+	tmp = strlen(SystemSetting.data.upload_file_url);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.upload_file_url, tmp);
+	tcp_len += tmp;
+}
+
+	/* SIM IMSI current_operator */
+	tmp = strlen(current_operator);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, current_operator, tmp);
+	tcp_len += tmp;
+
+#if (USE_ENCRYPT == 1)
+	/* MODULE IMEI */
+	tmp = strlen(DeviceSetting.IMEI);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, DeviceSetting.IMEI, tmp);
+	tcp_len += tmp;
+#else
+	/* SIM ICCID current_mcc*/
+	tmp = strlen(DeviceSetting.ICCID);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, DeviceSetting.ICCID, tmp);
+	tcp_len += tmp;
+#endif 	/* USE_ENCRYPT */
+	/* phone number sms setting 1 */
+	tmp = strlen(SystemSetting.data.Phone1);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.Phone1, tmp);
+	tcp_len += tmp;
+
+	/* phone number sms setting 2 */
+	tmp = strlen(SystemSetting.data.Phone2);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.Phone2, tmp);
+	tcp_len += tmp;
+
+	/* phone number SOS */
+	tmp = strlen(SystemSetting.data.Phone_sos);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.Phone_sos, tmp);
+	tcp_len += tmp;
+
+	/* motion value */
+	sprintf(str_motion_value, "%.2f\0", SystemSetting.data.MotionValue);
+	tmp = strlen(str_motion_value);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, str_motion_value, tmp);
+	tcp_len += tmp;
+
+	/* camera serial number list */
+	memset(cam_sn_list, 0x0, 128);
+	get_list_camera_sn(cam_sn_list);
+
+	tmp = strlen(cam_sn_list);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, cam_sn_list, tmp);
+	tcp_len += tmp;
+
+	/* Key Active */
+	tmp = strlen(SystemSetting.data.KeyActive);
+	buf.data[tcp_len] = tmp;
+	tcp_len++;
+	memcpy(buf.data + tcp_len, SystemSetting.data.KeyActive, tmp);
+	tcp_len += tmp;
+
+	/* Length data */
+	tcp_len += 1;//crc len
+	buf.data[11] = tcp_len & 0xFF;
+	buf.data[12] = tcp_len >> 8;
+
+	/* CRC */
+	crc = CRC_8BitsCompute(buf.data, tcp_len - 1);
+	buf.data[tcp_len - 1] = crc;
+
+	buf.size = tcp_len;
+	buf.Data_Type = DEVICE_SETTING;
+	buf.trace = 0;
+
+	Push_TCP_Data(buf);
+}
+
+static void init_gps_data(void){
+	time_t rawtime;
+	time( &rawtime );
+	GPS_Data.gps_speed = 0;
+	GPS_Data.pulse_speed = 0;
+	GPS_Data.gps_status = 0;
+	GPS_Data.timestamp = rawtime + GMT_HN;
+	GPS_Data.gps_time = GPS_Data.sys_time = localtime( &rawtime );
+	GPS_Data.location.latitude = 0.0;
+	GPS_Data.location.longitude = 0.0;
+	GPS_Data.gps_status = 0;
+	GPS_Data.prv_location.latitude = 0;
+	GPS_Data.prv_location.longitude = 0;
+}
+
+static u8 gps_idx = 0;
+static double distance_tmp = 0;
+static double distance_lv = 0;
+static u8 time_get_location = 0;
+static u16 cnt_rst_park = 0;
+static void ql_loc_rx_ind_msg_cb(loc_client_handle_type  h_loc,
+                                 E_QL_LOC_NFY_MSG_ID_T   e_msg_id,
+                                 void                    *pv_data,
+                                 void                    *contextPtr){
+    switch(e_msg_id){
+		case E_QL_LOC_NFY_MSG_ID_STATUS_INFO:{
+			char *status[]  = {"NONE",  "SESSION_BEGIN",  "SESSION_END",  "ENGINE_ON",  "ENGINE_OFF"};
+			E_QL_LOC_STATUS_VALUE_T e_status = *((E_QL_LOC_STATUS_VALUE_T*)pv_data);
+			log_system("GPS status=%s\n", status[e_status]);
+			break;
+		}
+        case E_QL_LOC_NFY_MSG_ID_LOCATION_INFO:{
+        	time_t rawtime;
+        	time_t gpstime;
+
+            QL_LOC_LOCATION_INFO_T *pt_location = (QL_LOC_LOCATION_INFO_T *)pv_data;
+
+			GPS_Data.gps_status = 1;
+
+            GPS_Data.gps_time_out = 0;
+
+            GPS_Data.tmp_speed = pt_location->speed * (float)3.6;
+
+            GPS_Data.timestamp = (pt_location->timestamp / 1000) + GMT_HN;
+
+            gpstime = (pt_location->timestamp / 1000);
+
+			time( &rawtime );
+
+			GPS_Data.sys_time = localtime( &rawtime );
+
+			GPS_Data.gps_time = localtime( &gpstime );
+
+			camera_count_ ++;
+
+            if((ACC_STATUS == 1) || (GPS_Data.location.latitude == 0) || (GPS_Data.location.longitude == 0)){
+            	if(ACC_STATUS == 0){
+            		if(time_get_location < 30){
+						time_get_location++;
+						break;
+            		}
+            	}
+
+            	GPS_Data.location.latitude = pt_location->latitude;
+            	GPS_Data.location.longitude = pt_location->longitude;
+
+				GPS_Data.gps_speed = pt_location->speed * 3.6;
+
+				GPS_Data.bearing = pt_location->bearing;
+
+				distance_tmp = calculate_distance(GPS_Data.location, GPS_Data.prv_location, 'm');
+				distance_lv = ((float)SystemSetting.data.RunLevel * (float)0.27778);
+				if((distance_tmp >= distance_lv) && (distance_tmp < 50.0)){
+					/* increment total km in day */
+					tibase.GPSMeter += distance_tmp;
+				}
+				GPS_Data.prv_location = GPS_Data.location;
+            }else{
+            	GPS_Data.gps_speed = 0;
+
+            	if(DeviceSetting.device_reset_when_park != 0){
+            		cnt_rst_park ++;
+            		if(cnt_rst_park >= 300){
+            			cnt_rst_park = 0;
+
+            			DeviceSetting.device_reset_when_park --;
+            			write_number(DEV_RST_WHEN_PARK_PATH, (u64)DeviceSetting.device_reset_when_park);
+
+    					reboot_camera();
+    					/* reboot device on new day */
+    					set_device_reset_timeout(30);
+            		}
+            	}
+            }
+
+            gps_idx = (GPS_Data.timestamp % SystemSetting.data.FrqRun);
+			if(gps_idx == 0){
+				GPS_Data.speeds[SystemSetting.data.FrqRun - 1] = GPS_Data.gps_speed;
+				GPS_Data.locations[SystemSetting.data.FrqRun - 1] = GPS_Data.location;
+			}else{
+				GPS_Data.speeds[gps_idx - 1] = GPS_Data.gps_speed;
+				GPS_Data.locations[gps_idx - 1] = GPS_Data.location;
+			}
+
+            /* send real time data (gps signal = 1) */
+            if((GPS_Data.freq_send > 0) && ((GPS_Data.timestamp % GPS_Data.freq_send) == 0)){
+				/* wite gps data to database */
+				write_gps_data();
+
+				/* send gps data to server */
+				if((network_data.tcp_status) && (SystemSetting.data.DeviceID != 0)){
+					send_realtime_data();
+				}
+
+				memset(GPS_Data.speeds, 0x0, GPS_PER_SECOND);
+				memset(&GPS_Data.locations, 0x0, sizeof(GPS_Data.locations));
+				GPS_Data.flg_update_cam = true;
+            }
+
+			/* check over speed */
+			if(GPS_Data.gps_speed > DeviceSetting.SpeedLimit){
+				if(GPS_Data.ovSpeedData.ovSpeedHold == 0){
+					GPS_Data.ovSpeedData.StartTime = GPS_Data.timestamp;
+					GPS_Data.ovSpeedData.StartLocation = GPS_Data.location;
+				}
+
+				GPS_Data.ovSpeedData.ovSpeedHold += 1;
+
+				GPS_Data.ovSpeedData.speeds += GPS_Data.gps_speed;
+				if((GPS_Data.ovSpeedData.ovSpeedHold == 3) || (GPS_Data.ovSpeedData.ovSpeedHold % 15) == 0){
+					add_play_list("/usrdata/sound/", "overspeed.wav", SystemSetting.data.SpeakerVolume);
+				}
+				tibase.over_speed_status = true;
+			}else{
+				tibase.over_speed_status = false;
+
+				/* Over speed 20 second */
+				if(GPS_Data.ovSpeedData.ovSpeedHold >= 29){
+					SendOverSpeed();
+				}
+				GPS_Data.ovSpeedData.ovSpeedHold = 0;
+			}
+
+			if(DeviceSetting.CurrentDay != GPS_Data.gps_time->tm_mday){
+				if(((GPS_Data.gps_time->tm_year != 80) && (GPS_Data.gps_time->tm_mday > 0) && (GPS_Data.gps_time->tm_mday <= 31))){
+					log_gps("GO TO NEW DAY %d - %d!!!!!\n", DeviceSetting.CurrentDay, GPS_Data.gps_time->tm_mday);
+
+					if((GPS_Data.gps_time->tm_min >= 15) || (GPS_Data.gps_time->tm_hour != 0)){
+						clear_driver_result();
+						/* update tibase to database */
+						update_tibase(tibase);
+					}
+
+					DeviceSetting.CurrentDay = GPS_Data.gps_time->tm_mday;
+					/* delete all trip info and driver data new day */
+					delete_database_ByDay(DeviceSetting.CurrentDay);
+					/* update current day value */
+					write_number(CURRENT_DAY_PATH, (u64)DeviceSetting.CurrentDay);
+					/* set flg new day in drive_cal */
+					GPS_Data.flg_new_day = 1;
+
+					/* reboot camera */
+					reboot_camera();
+
+					/* reset count of dev rst */
+					clear_time_reset_increment();
+
+					/* reboot device */
+					set_device_reset_timeout(120);
+				}
+			}
+
+            /* driver data calculate */
+            calculate_drive_data();
+
+			break;
+        }
+        case E_QL_LOC_NFY_MSG_ID_SV_INFO:
+        {
+            int i, svs_in_use = 0;
+            QL_LOC_SV_STATUS_T  *pt_svinfo = (QL_LOC_SV_STATUS_T  *)pv_data;
+
+            for(i=0; i<pt_svinfo->num_svs; i++)
+            {
+            	if((pt_svinfo->used_in_fix_mask&(1<<i)))
+            		svs_in_use++;
+            }
+            GPS_Data.svs_in_use = svs_in_use;
+            GPS_Data.svs_in_view = pt_svinfo->num_svs;
+
+            log_debug("GPS: %d, SVS in view: %d, SVS in use: %d\n", GPS_Data.gps_status, GPS_Data.svs_in_view,  GPS_Data.svs_in_use);
+            break;
+        }
+        case E_QL_LOC_NFY_MSG_ID_NMEA_INFO:
+        	 break;
+        case E_QL_LOC_NFY_MSG_ID_CAPABILITIES_INFO:
+            break;
+        case E_QL_LOC_NFY_MSG_ID_AGPS_STATUS:
+            break;
+        case E_QL_LOC_NFY_MSG_ID_NI_NOTIFICATION:
+            break;
+        case E_QL_LOC_NFY_MSG_ID_XTRA_REPORT_SERVER:
+            break;
+        default:
+        	log_gps("GPS DATA NOT IN CASE\n");
+        	break;
+    }
+}
+
+typedef enum{
+    STATE_LOC_INIT = 0,
+    STATE_ADD_RX_HANDLER = 1,
+    STATE_SET_INDICATION = 2,
+	STATE_SET_POSITION_MODE = 3,
+    STATE_START_NAVIGATION = 4,
+	STATE_GPS_READY = 5,
+	STATE_GPS_ERROR = 6
+}Enum_GPSSTATE;
+
+Enum_GPSSTATE gps_init_state = STATE_LOC_INIT;
+u8 transfer_setting_mcu = 0;
+void* thread_gps(void* arg){
+	int ret         = E_QL_OK;
+	int h_loc       = 0;
+	//int time_to_update_data = 0;
+	QL_LOC_POS_MODE_INFO_T  t_mode      = {0};
+	QL_LOC_LOCATION_INFO_T  t_loc_info  = {0};
+    //setting time zone to GMT +7
+	set_tz_gmt_hn();
+	memset(&GPS_Data, 0x0, sizeof(GPS_typedef));
+
+	memset(&MCU_Data, 0x0, sizeof(mcu_type_def));
+
+	/* set default frequency send */
+	GPS_Data.freq_send = FREQ_WRITE_GPS_RUN;
+
+	/* send device config to server */
+	GPS_Data.flg_send_cfg = 1;
+	MCU_Data.last_Hard_Acc = 2;
+
+	/* set default gps data */
+	init_gps_data();
+
+	for(;;){
+		/* calculator frequency send gps data  */
+		cal_tcp_freq();
+		/* init gps service */
+		if(STATE_GPS_READY != gps_init_state){
+			switch(gps_init_state){
+				case STATE_LOC_INIT:{
+					ret = QL_LOC_Client_Init(&h_loc);
+					log_gps("QL_LOC_Client_Init ret %d with h_loc=%d\n", ret, h_loc);
+					if(0 != ret){
+						log_gps("QL_LOC_Client_Init FAILED\n");
+
+						gps_init_state = STATE_GPS_ERROR;
+						break;
+					}
+					gps_init_state = STATE_ADD_RX_HANDLER;
+					break;
+				}
+				case STATE_ADD_RX_HANDLER:{
+					ret = QL_LOC_AddRxIndMsgHandler(ql_loc_rx_ind_msg_cb, (void*)h_loc);
+					log_gps("QL_LOC_AddRxIndMsgHandler ret %d\n", ret);
+					if(0 != ret){
+						log_gps("QL_LOC_AddRxIndMsgHandler FAILED\n");
+						gps_init_state = STATE_GPS_ERROR;
+						break;
+					}
+					gps_init_state = STATE_SET_INDICATION;
+					break;
+				}
+				case STATE_SET_INDICATION:{
+					/* Set what we want callbacks for */
+					ret = QL_LOC_Set_Indications(h_loc, LOCATON_BITMASK);
+					log_gps("QL_LOC_Set_Indications ret %d\n", ret);
+					if(0 != ret){
+						log_gps("QL_LOC_Set_Indications FAILED\n");
+						gps_init_state = STATE_GPS_ERROR;
+						break;
+					}
+					gps_init_state = STATE_SET_POSITION_MODE;
+					break;
+				}
+				case STATE_SET_POSITION_MODE:{
+					t_mode.mode                 = E_QL_LOC_POS_MODE_STANDALONE;
+					t_mode.recurrence           = E_QL_LOC_POS_RECURRENCE_PERIODIC;
+					t_mode.min_interval         = 1000;  //report nmea frequency 1Hz
+					t_mode.preferred_accuracy   = 50;    // <50m
+					t_mode.preferred_time       = 90;    // 90s
+					ret = QL_LOC_Set_Position_Mode(h_loc, &t_mode);
+					log_gps("QL_LOC_Set_Position_Mode ret %d\n", ret);
+
+					if(0 != ret){
+						log_gps("QL_LOC_Set_Position_Mode FAILED\n");
+
+						gps_init_state = STATE_GPS_ERROR;
+						break;
+					}
+					gps_init_state = STATE_START_NAVIGATION;
+					break;
+				}
+				case STATE_START_NAVIGATION:{
+					ret = QL_LOC_Start_Navigation(h_loc);
+					log_gps("QL_LOC_Start_Navigation ret=%d\n", ret);
+
+					if(0 != ret){
+						log_gps("QL_LOC_Start_Navigation FAILED\n");
+						gps_init_state = STATE_GPS_ERROR;
+						break;
+					}
+
+					if(!access("/usrdata/xtra2.bin", F_OK)){
+			            ret = QL_LOC_Xtra_InjectFile(h_loc, "/usrdata/xtra2.bin");
+			            log_system("QL_LOC_Xtra_InjectFile ret=%d\n", ret);
+
+			            QL_LOC_AGPS_DATA_CONN_OPEN_INTO_T t_info = {0};
+			            //You should fill t_info with right value
+			            ret = QL_LOC_Agps_DataConnOpen(h_loc, &t_info);
+			            log_system("QL_LOC_Agps_DataConnOpen ret=%d\n", ret);
+					}
+
+					gps_init_state = STATE_GPS_READY;
+				}
+				case STATE_GPS_READY:{
+					time_t rawtime;
+					time( &rawtime );
+					GPS_Data.gps_time = GPS_Data.sys_time = localtime( &rawtime );
+					GPS_READY = 1;
+					break;
+				}
+				case STATE_GPS_ERROR:{
+					log_system("################# START GPS FAILED -> REBOOT ###############\n");
+					set_device_reset_timeout(10);
+					break;
+				}
+			}
+		}else{
+			GPS_Data.tm_up++;
+			GPS_Data.gps_time_out++;
+
+			if(GPS_Data.no_acc_time <= 3700){
+				GPS_Data.no_acc_time++;
+			}
+
+			if((GPS_Data.tm_up > 0) && (GPS_Data.tm_up % 5) == 0){
+				if(SystemSetting.data.DeviceID == 0){
+					/* get data when device id = 0 */
+					get_mcu_devsetting();
+				}else if(MCU_Data.MCU_Verison != 0){
+					if(transfer_setting_mcu == 0){
+						transfer_setting_mcu = 1;
+						update_mcu_devsetting();
+					}
+				}
+
+				update_mcu_gps_data();
+				update_rfid_status();
+				sprintf(svs_info, "GPS: %d, in view: %d, in use: %d\0", GPS_Data.gps_status, GPS_Data.svs_in_view, GPS_Data.svs_in_use);
+				sprintf(ir_led_info, "C Ir1: %d, C Ir2: %d | IR: %d-%d | hiring: %d\0", MCU_Data.counter_ir_1, MCU_Data.counter_ir_2, MCU_Data.hirring_sensor_1, MCU_Data.hirring_sensor_2,  MCU_Data.hirring_local_state);
+				sprintf(svs_inf, "%d0%d\0", GPS_Data.svs_in_view, GPS_Data.svs_in_use);
+				GPS_Data.svs_in_snd = ec21_atoi(svs_inf);
+
+				if((GPS_Data.tm_up % TIME_10_MINUTES) == 0){
+					send_device_setting();
+				}
+			}
+
+			if(GPS_Data.cam_up_time <= 600){
+				GPS_Data.cam_up_time++;
+				if((GPS_Data.cam_up_time % 20) == 0){
+					GPS_Data.flg_scan_cam = true;
+				}
+			}
+
+			if((GPS_Data.tm_up > 0) && (GPS_Data.tm_up % 3600) == 0){
+				GPS_Data.flg_reboot_sgmi = true;
+			}
+
+            if((GPS_Data.freq_send_camera > 0) && (camera_count_ >= GPS_Data.freq_send_camera) && (SystemSetting.data.disable_capture == 0)){
+            	camera_count_ = 0;
+            	GPS_Data.flg_capture = true;
+            }
+
+			if(GPS_Data.gps_time_out > 10){/* gps message timeout - loss signal */
+				time_t rawtime;
+				time( &rawtime );
+				camera_count_ ++;
+				GPS_Data.gps_speed = 0;
+				GPS_Data.tmp_speed = 0;
+				GPS_Data.gps_status = 0;
+				GPS_Data.timestamp = rawtime + GMT_HN;
+				GPS_Data.gps_time = GPS_Data.sys_time = localtime( &rawtime );
+				memset(GPS_Data.speeds, 0x0, GPS_PER_SECOND);
+
+				if((GPS_Data.location.latitude == 0) || (GPS_Data.location.longitude == 0)){
+					if((tibase.b_loc_stop.latitude == 0) && (tibase.b_loc_stop.longitude == 0)){
+						GPS_Data.location = tibase.b_loc_stop;
+					}
+				}
+
+				/* send real time data (gps signal = 0) */
+				if((GPS_Data.freq_send > 0) && ((rawtime % GPS_Data.freq_send) == 0)){
+					char mcu_msg[128];
+
+	            	/* send gps data to server */
+	            	if(network_data.tcp_status){
+	            		send_realtime_data();
+	            	}
+					sprintf(mcu_msg, "LOSS GPS - SYSTEM TIME : %s\n", asctime(GPS_Data.sys_time));
+					log_gps(mcu_msg);
+				}
+
+				/* wite gps data to file */
+				if((rawtime % FREQ_WRITE_LOSS_GPS) == 0){
+					write_gps_data();
+				}
+
+				tibase.over_speed_status = false;
+				tibase.over_driver_continue_status = false;
+
+				if((GPS_Data.gps_time_out > TIME_5_MINUTES) && (get_run_time() > TIME_15_MINUTES)){
+					log_system("##### clear driver result when device loss GPS than more 15 Minute #####\n");
+					/* Write driver data */
+					write_driver_data(STATUS_RUNNING, (time_t)tibase.bRunTime, (time_t)tibase.bStopTime, GPS_Data.location, (u8)GPS_Data.gps_time->tm_mday);
+
+					clear_driver_result();
+
+					/* Reset time driving pre time */
+					tibase.RunSecondsPrvDay = 0;
+				}
+
+				if(GPS_Data.gps_time_out >= get_frq_reset()){
+					/* increase time reset */
+					increase_frq_reset();
+
+					GPS_Data.gps_time_out = 0;
+
+					//reboot device
+					log_system("################# LOSS GPS -> REBOOT ###############\n");
+
+					set_device_reset_timeout(10);
+				}
+			}
+		}
+
+		MCU_Data.pwr_warning_delay_tm++;
+		if(MCU_Data.pwr_warning_delay_tm > 200){
+			MCU_Data.pwr_warning_delay_tm = 100;
+		}
+
+		if(GPS_Data.flg_send_cfg == 1){
+			GPS_Data.time_to_send_evt ++;
+			if(GPS_Data.time_to_send_evt >= 120){
+				GPS_Data.time_to_send_evt = 0;
+				GPS_Data.flg_send_cfg = 0;
+				/* send device setting to server */
+				send_device_setting();
+			}
+		}
+
+		sleep(1);
+	}
+}
+
+void clear_camera_cnt(void){
+	camera_count_ = 0;
+}
+
+u8 gps_ready(void){
+	return (gps_init_state == STATE_GPS_READY) ? 1 : 0;
+}
+

@@ -1,0 +1,1 @@
+hexmate.exe GDBootLoader4G.hex GDBK10-MCU.hex -OGDMCU-V-.hex

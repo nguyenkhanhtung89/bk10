@@ -1,0 +1,393 @@
+#include <ql_oe.h>
+
+#include "devconfig.h"
+#include "utils.h"
+#include "store.h"
+#include "log.h"
+#include "gps.h"
+#include "mcu.h"
+#include "camera.h"
+#include "filter.h"
+
+device_setting_typedef DeviceSetting;
+
+system_setting_typedef SystemSetting;
+
+void sync_dev_setting(void){
+	char str[16];
+	write_number(DEVICE_ID_PATH, SystemSetting.data.DeviceID);
+	write_string(DOMAIN_PATH, SystemSetting.data.domain);
+	write_number(PORT_PATH, (u64)SystemSetting.data.port);
+	write_number(FRQ_RUN_PATH, (u64)SystemSetting.data.FrqRun);
+	write_number(FRQ_STOP_PATH, (u64)SystemSetting.data.FrqStop);
+	write_string(PASSWORD_PATH, SystemSetting.data.PassWord);
+	write_number(BUZZER_LEVEL_PATH, (u64)SystemSetting.data.BuzzerLevel);
+	write_number(ACC_MODE_PATH, (u64)SystemSetting.data.AccMode);
+	write_string(UPLOAD_FILE_URL_PATH, SystemSetting.data.upload_file_url);
+	write_number(FILTER_LEVEL_PATH, (u64)SystemSetting.data.filter_level);
+	write_number(ADC_PULSE_PATH, (u64)SystemSetting.data.AdcPulseCfg);
+	write_number(OBD_TYPE_PATH, (u64)SystemSetting.data.OBDType);
+	write_string(KEYACTIVE_PATH, SystemSetting.data.KeyActive);
+	write_number(CERTIFIED_PATH, (u64)SystemSetting.data.certified);
+	write_number(SLIENCE_MODE_PATH, (u64)SystemSetting.data.SlienceMode);
+	write_number(SPEAKER_VOLUME_PATH, (u64)SystemSetting.data.SpeakerVolume);
+	write_number(DIS_CAM_ROAMING_PATH, (u64)SystemSetting.data.disable_camera_roaming_mode);
+	write_number(TIME_RESET_MODULE_PATH, (u64)SystemSetting.data.time_reset_when_disconnect);
+	write_number(DOOR_REVERT_PATH, (u64)SystemSetting.data.DoorRevert);
+	write_number(AIR_REVERT_PATH, (u64)SystemSetting.data.AirRevert);
+	write_number(DISABLE_CAM_PATH, (u64)SystemSetting.data.disable_cam);
+	write_number(DIS_CAM_CAPTURE_PATH, (u64)SystemSetting.data.disable_capture);
+	write_number(DISABLE_AUDIO_PATH, (u64)SystemSetting.data.disable_audio);
+	write_number(FRQ_CAPTURE_RUN_PATH, (u64)SystemSetting.data.FrqCaptureRun);
+	write_number(FRQ_CAPTURE_STOP_PATH, (u64)SystemSetting.data.FrqCaptureStop);
+	write_number(DRV_FORE_WARN_TIME_PATH, (u64)SystemSetting.data.DrvForeWarningTime);
+	write_number(DRV_STOP_TIME_PATH, (u64)SystemSetting.data.DrvStopTime);
+	write_number(RUN_LEVEL_PATH, (u64)SystemSetting.data.RunLevel);
+	write_number(AD_THRESHOLD_PATH, (u64)SystemSetting.data.ad_threshold_increase);
+
+	sprintf(str, "%.2f", SystemSetting.data.MotionValue);
+	write_string(MOTION_VALUE_PATH, str);
+	write_string(PHONE_1_PATH, SystemSetting.data.Phone1);
+	write_string(PHONE_2_PATH, SystemSetting.data.Phone2);
+	write_string(PHONE_SOS_PATH, SystemSetting.data.Phone_sos);
+	write_string(PROVIDER_PATH, SystemSetting.data.Provider);
+	write_string(UPDATE_FW_URL_PATH, SystemSetting.data.update_fw_url);
+	write_number(FUEL_3_TO_2_PATH, (u64)SystemSetting.data.fuel_3_to_2);
+	write_number(FUEL_3_TO_1_PATH, (u64)SystemSetting.data.fuel_3_to_1);
+	write_number(FUEL_2_TO_1_PATH, (u64)SystemSetting.data.fuel_2_to_1);
+	write_number(DIS_RST_DEV_PATH, (u64)SystemSetting.data.dis_sys_rst_when_dis_cam);
+	write_number(DIS_OFF_CAM_PARK_PATH, (u64)SystemSetting.data.disable_pw_off_cam_when_park);
+	write_number(TIME_OFF_CAM_PARK_PATH, (u64)SystemSetting.data.time_pw_off_camera_when_park);
+}
+
+void load_device_setting(void){
+	u64 temp = 0;
+	u8 buff[64];
+
+	//load device id setting
+	SystemSetting.data.DeviceID = read_number(DEVICE_ID_PATH);
+
+	//load domain / port setting
+	memset(SystemSetting.data.domain, 0x0, MAX_SIZE_URL);
+	if(read_string(DOMAIN_PATH, SystemSetting.data.domain) < 0){
+		sprintf(SystemSetting.data.domain, "g3.etec.vn\0");
+		SystemSetting.data.port = 31010;
+	}
+
+	SystemSetting.data.port = read_number(PORT_PATH);
+	if(SystemSetting.data.port == 0){
+		sprintf(SystemSetting.data.domain, "g3.etec.vn\0");
+		SystemSetting.data.port = 31010;
+	}
+
+	strim(SystemSetting.data.domain);
+
+	//load number plate
+	memset(DeviceSetting.NumberPlate, 0x0, 64);
+	read_string(NUMBER_PLATE_PATH, DeviceSetting.NumberPlate);
+
+	//load provider
+	memset(SystemSetting.data.Provider, 0x0, 32);
+	read_string(PROVIDER_PATH, SystemSetting.data.Provider);
+
+	if((strlen(SystemSetting.data.Provider) < 4) && (SystemSetting.data.DeviceID >= 10000000) && (SystemSetting.data.DeviceID < 19999999)){
+		sprintf(SystemSetting.data.Provider, "%s\0", "DINH VI BACH KHOA");
+	}else{
+		sprintf(SystemSetting.data.Provider, "%s\0", " ");
+	}
+
+	//load frequency run
+	SystemSetting.data.FrqRun = read_number(FRQ_RUN_PATH);
+	if((SystemSetting.data.FrqRun == 0) || (SystemSetting.data.FrqRun > FREQ_RUN)){
+		SystemSetting.data.FrqRun = FREQ_RUN;
+	}
+
+	//load frequency stop
+	SystemSetting.data.FrqStop = read_number(FRQ_STOP_PATH);
+	if((SystemSetting.data.FrqStop == 0) || (SystemSetting.data.FrqStop > 3600)){
+		SystemSetting.data.FrqStop = FREQ_STOP;
+	}
+
+	//load Speed Limit
+	DeviceSetting.SpeedLimit = read_number(SPEED_LIMIT_PATH);
+	if((DeviceSetting.SpeedLimit < 30) || (DeviceSetting.SpeedLimit > 200)){
+		DeviceSetting.SpeedLimit = 80;
+	}
+	speed_limit_device = DeviceSetting.SpeedLimit;
+
+	//load sms password
+	memset(SystemSetting.data.PassWord, 0x0, 16);
+	read_string(PASSWORD_PATH, SystemSetting.data.PassWord);
+	strim(SystemSetting.data.PassWord);
+	if(strlen(SystemSetting.data.PassWord) < 6){
+		sprintf(SystemSetting.data.PassWord, "000000\0");
+	}
+
+	//load phone1 number
+	memset(SystemSetting.data.Phone1, 0x0, MAX_SIZE_PHONE_NUMBER);
+	read_string(PHONE_1_PATH, SystemSetting.data.Phone1);
+
+	//load phone2 number
+	memset(SystemSetting.data.Phone2, 0x0, MAX_SIZE_PHONE_NUMBER);
+	read_string(PHONE_2_PATH, SystemSetting.data.Phone2);
+
+	//load phone sos number
+	memset(SystemSetting.data.Phone_sos, 0x0, MAX_SIZE_PHONE_NUMBER);
+	read_string(PHONE_SOS_PATH, SystemSetting.data.Phone_sos);
+
+	//setting for input mode (cycle - adc - pulse)
+	SystemSetting.data.AdcPulseCfg = (Fuel_type)(read_number(ADC_PULSE_PATH));
+	if(SystemSetting.data.AdcPulseCfg > PULSE_MODE){
+		SystemSetting.data.AdcPulseCfg = CYCLE_MODE;
+	}
+
+	SystemSetting.data.ad_threshold_increase = read_number(AD_THRESHOLD_PATH);
+	if(SystemSetting.data.ad_threshold_increase < 100){
+		SystemSetting.data.ad_threshold_increase = 200;
+	}
+
+	//setting for OBD type
+	SystemSetting.data.OBDType = (enum_OBD_type)(read_number(OBD_TYPE_PATH));
+	if(SystemSetting.data.OBDType > J1587_TYPE){
+		SystemSetting.data.OBDType = OBD_NONE;
+	}
+
+	//baudrate config for UART
+	DeviceSetting.BauRate2 = read_number(BAUD2_PATH);//MC
+	if(DeviceSetting.BauRate2 == 0){
+		DeviceSetting.BauRate2 = 9600;
+	}
+
+	DeviceSetting.BauRate4 = read_number(BAUD4_PATH);//MC
+	if(DeviceSetting.BauRate4 == 0){
+		DeviceSetting.BauRate4 = 9600;
+	}
+
+	//load Manufacture Date
+	memset(DeviceSetting.ManufactureDate, 0x0, 64);
+	read_string(MANUFACTURE_DATE_PATH, DeviceSetting.ManufactureDate);
+	strim(DeviceSetting.ManufactureDate);
+	if(strlen(DeviceSetting.ManufactureDate) != 10){
+		sprintf(DeviceSetting.ManufactureDate, "2020/01/01\0");
+	}
+
+	//load DeviceUpdated Date
+	memset(DeviceSetting.DeviceUpdatedDate, 0x0, 64);
+	read_string(DEVICE_UPDATE_DATE_PATH, DeviceSetting.DeviceUpdatedDate);
+	strim(DeviceSetting.DeviceUpdatedDate);
+	if(strlen(DeviceSetting.DeviceUpdatedDate) != 10){
+		sprintf(DeviceSetting.DeviceUpdatedDate, "2020/01/01\0");
+	}
+
+	//load buzzer level
+	SystemSetting.data.BuzzerLevel = read_number(BUZZER_LEVEL_PATH);
+	if(((SystemSetting.data.DeviceID == 0) && (SystemSetting.data.BuzzerLevel == 0)) || (SystemSetting.data.BuzzerLevel > 5)){
+		SystemSetting.data.BuzzerLevel = 5;
+		write_number(BUZZER_LEVEL_PATH, (u64)SystemSetting.data.BuzzerLevel);
+	}
+
+	//load door revert
+	SystemSetting.data.DoorRevert = read_number(DOOR_REVERT_PATH);
+	if(SystemSetting.data.DoorRevert > 1){
+		SystemSetting.data.DoorRevert = 0;
+	}
+
+	//load air revert
+	SystemSetting.data.AirRevert = read_number(AIR_REVERT_PATH);
+	if(SystemSetting.data.AirRevert > 1){
+		SystemSetting.data.AirRevert = 0;
+	}
+
+	//load run level
+	SystemSetting.data.RunLevel = read_number(RUN_LEVEL_PATH);
+	if((SystemSetting.data.RunLevel == 0) || (SystemSetting.data.RunLevel > 40)){
+		SystemSetting.data.RunLevel = 2;
+	}
+
+	//load run level
+	SystemSetting.data.SlienceMode = read_number(SLIENCE_MODE_PATH);
+	if(SystemSetting.data.SlienceMode > 1){
+		SystemSetting.data.SlienceMode = 0;
+	}
+
+	//load motion value setting
+	if(read_float(MOTION_VALUE_PATH, &SystemSetting.data.MotionValue) < 0){
+		SystemSetting.data.MotionValue = 1.0;
+	}
+	if(SystemSetting.data.MotionValue == 0){
+		SystemSetting.data.MotionValue = 1.0;
+	}
+
+	//load current day value
+	DeviceSetting.CurrentDay = read_number(CURRENT_DAY_PATH);
+
+	//load drive waring time before vehicle over drive continue time
+	SystemSetting.data.DrvForeWarningTime = read_number(DRV_FORE_WARN_TIME_PATH);
+	if((SystemSetting.data.DrvForeWarningTime < TIME_5_MINUTES) || (SystemSetting.data.DrvForeWarningTime > TIME_1_HOUR)){
+		SystemSetting.data.DrvForeWarningTime = TIME_5_MINUTES;
+	}
+
+	//load time for stopping
+	SystemSetting.data.DrvStopTime = read_number(DRV_STOP_TIME_PATH);
+	if((SystemSetting.data.DrvStopTime < TIME_1_MINUTES) || (SystemSetting.data.DrvStopTime > TIME_15_MINUTES)){
+		SystemSetting.data.DrvStopTime = TIME_3_MINUTES;
+	}
+
+	//load update firmware url
+	memset(SystemSetting.data.update_fw_url, 0x0, MAX_SIZE_URL);
+	if(read_string(UPDATE_FW_URL_PATH, SystemSetting.data.update_fw_url) < 0){
+		sprintf(SystemSetting.data.update_fw_url, "http://fw.dvbk.vn\0");
+	}else{
+		if((str_find(SystemSetting.data.update_fw_url, ".") <= 2) || (strlen(SystemSetting.data.update_fw_url) < 10)){
+			sprintf(SystemSetting.data.update_fw_url, "http://fw.dvbk.vn\0");
+		}
+	}
+	strim(SystemSetting.data.update_fw_url);
+
+#if (USE_ENCRYPT == 1)
+	//load upload file url
+	memset(SystemSetting.data.upload_file_url, 0x0, MAX_SIZE_URL);
+	if(read_string(UPLOAD_FILE_URL_PATH, SystemSetting.data.upload_file_url) < 0){
+		sprintf(SystemSetting.data.upload_file_url, "http://g3.etec.vn/api/UpCamEncrypt\0");
+	}else{
+		if((str_find(SystemSetting.data.upload_file_url, ".") <= 2) || (strlen(SystemSetting.data.upload_file_url) < 10)){
+			sprintf(SystemSetting.data.upload_file_url, "http://g3.etec.vn/api/UpCamEncrypt\0");
+		}
+	}
+#else
+	//load upload file url
+	memset(SystemSetting.data.upload_file_url, 0x0, MAX_SIZE_URL);
+	if(read_string(UPLOAD_FILE_URL_PATH, SystemSetting.data.upload_file_url) < 0){
+		sprintf(SystemSetting.data.upload_file_url, "http://cam.dvbk.vn/api/UpCamGPS\0");
+	}else{
+		if((str_find(SystemSetting.data.upload_file_url, ".") <= 2) || (strlen(SystemSetting.data.upload_file_url) < 10)){
+			sprintf(SystemSetting.data.upload_file_url, "http://cam.dvbk.vn/api/UpCamGPS\0");//http://cam.dvbk.vn/api/UpCamGPS
+		}
+	}
+#endif  /* USE_ENCRYPT */
+	strim(SystemSetting.data.upload_file_url);
+
+	//load acc mode
+	temp = read_number(ACC_MODE_PATH);
+	if((enum_AccMode)temp > NO_ACC_LSM_NO_SPEED){
+		SystemSetting.data.AccMode = ACC_LSM;
+	}else{
+		SystemSetting.data.AccMode = (enum_AccMode)temp;
+	}
+
+	//load fuel manual mode config
+	DeviceSetting.FuelManualMode = read_number(FUEL_MANUAL_PATH);
+	if(DeviceSetting.FuelManualMode > 1) DeviceSetting.FuelManualMode = 0;
+
+	/* Load camera capture run */
+	SystemSetting.data.FrqCaptureRun = read_number(FRQ_CAPTURE_RUN_PATH);
+	if((SystemSetting.data.FrqCaptureRun < 5) || (SystemSetting.data.FrqCaptureRun  > 300)){
+		SystemSetting.data.FrqCaptureRun  = 180;
+	}
+
+	GPS_Data.freq_send_camera = SystemSetting.data.FrqCaptureRun;
+	GPS_Data.flg_capture = false;
+
+	/* Load camera capture stop */
+	SystemSetting.data.FrqCaptureStop = read_number(FRQ_CAPTURE_STOP_PATH);
+	if((SystemSetting.data.FrqCaptureStop  < 10) || (SystemSetting.data.FrqCaptureStop  > 14400)){
+		SystemSetting.data.FrqCaptureStop  = 1800;
+	}
+
+	/* Load speaker volume */
+	SystemSetting.data.SpeakerVolume = read_number(SPEAKER_VOLUME_PATH);
+	if(((SystemSetting.data.DeviceID == 0) && (SystemSetting.data.SpeakerVolume == 0)) || (SystemSetting.data.SpeakerVolume > 25)){
+		SystemSetting.data.SpeakerVolume = 5;
+		write_number(SPEAKER_VOLUME_PATH, (u64)SystemSetting.data.SpeakerVolume);
+	}
+
+	/* Load car type */
+	DeviceSetting.CarType = read_number(CAR_TYPE_PATH);
+
+	/* Load KeyActive */
+	memset(SystemSetting.data.KeyActive, 0x0, 16);
+	read_string(KEYACTIVE_PATH, SystemSetting.data.KeyActive);
+
+	SystemSetting.data.certified =  read_number(CERTIFIED_PATH);
+	if(strlen(SystemSetting.data.KeyActive) <= 10){
+		SystemSetting.data.certified = 1;
+	}
+
+	/* load cam and audio active/deactive setting */
+	SystemSetting.data.disable_cam = read_number(DISABLE_CAM_PATH);
+	SystemSetting.data.disable_audio = read_number(DISABLE_AUDIO_PATH);
+
+	SystemSetting.data.disable_camera_roaming_mode = read_number(DIS_CAM_ROAMING_PATH);
+	if(SystemSetting.data.disable_camera_roaming_mode > 1) SystemSetting.data.disable_camera_roaming_mode = 0;
+
+	SystemSetting.data.disable_capture = read_number(DIS_CAM_CAPTURE_PATH);
+	if(SystemSetting.data.disable_capture > 1) SystemSetting.data.disable_capture = 0;
+
+	SystemSetting.data.time_reset_when_disconnect = read_number(TIME_RESET_MODULE_PATH);
+	if((SystemSetting.data.time_reset_when_disconnect < 120) || (SystemSetting.data.time_reset_when_disconnect > 7200)){
+		SystemSetting.data.time_reset_when_disconnect = 1800;
+	}
+
+	/* Load filter level */
+	SystemSetting.data.filter_level = read_number(FILTER_LEVEL_PATH);
+	if(SystemSetting.data.filter_level > 8){
+		SystemSetting.data.filter_level = 0;
+	}
+
+	/* Load fuel config */
+	SystemSetting.data.fuel_3_to_2 = read_number(FUEL_3_TO_2_PATH);
+	if(SystemSetting.data.fuel_3_to_2 > 1){
+		SystemSetting.data.fuel_3_to_2 = 0;
+	}
+	SystemSetting.data.fuel_3_to_1 = read_number(FUEL_3_TO_1_PATH);
+	if(SystemSetting.data.fuel_3_to_1 > 1){
+		SystemSetting.data.fuel_3_to_1 = 0;
+	}
+	SystemSetting.data.fuel_2_to_1 = read_number(FUEL_2_TO_1_PATH);
+	if(SystemSetting.data.fuel_2_to_1 > 1){
+		SystemSetting.data.fuel_2_to_1 = 0;
+	}
+
+	/* Load camera number */
+	DeviceSetting.CameraNumber = read_number(CAM_NUMBER_PATH);
+	init_cam();
+
+	SystemSetting.data.dis_sys_rst_when_dis_cam = read_number(DIS_RST_DEV_PATH);
+
+	SystemSetting.data.disable_pw_off_cam_when_park = read_number(DIS_OFF_CAM_PARK_PATH);
+	if(SystemSetting.data.disable_pw_off_cam_when_park > 1){
+		SystemSetting.data.disable_pw_off_cam_when_park = 0;
+	}
+
+	SystemSetting.data.time_pw_off_camera_when_park = read_number(TIME_OFF_CAM_PARK_PATH);
+	if((SystemSetting.data.time_pw_off_camera_when_park < 120) || (SystemSetting.data.time_pw_off_camera_when_park > 3600)){
+		SystemSetting.data.time_pw_off_camera_when_park = 900;
+	}
+
+	DeviceSetting.time_reset_increment = read_number(TIME_RESET_INCREMENT);
+
+	DeviceSetting.device_reset_when_park = read_number(DEV_RST_WHEN_PARK_PATH);
+
+	DeviceSetting.count_cam_reset = read_number(COUNT_RESET_BY_CAM_PATH);
+	if(DeviceSetting.count_cam_reset >= 3){
+		DeviceSetting.count_cam_reset = 0;
+		DeviceSetting.cam_num_detected = 0;
+		DeviceSetting.device_reset_when_park = 3;
+		write_number(CAM_NUM_DETECTED_PATH, (u64)DeviceSetting.cam_num_detected);
+		write_number(COUNT_RESET_BY_CAM_PATH, (u64)DeviceSetting.count_cam_reset);
+		write_number(DEV_RST_WHEN_PARK_PATH, (u64)DeviceSetting.device_reset_when_park);
+		sync();
+	}
+
+	DeviceSetting.cam_num_detected = read_number(CAM_NUM_DETECTED_PATH);
+	if((DeviceSetting.cam_num_detected > 0) && (DeviceSetting.cam_num_detected < 9)){
+		DeviceSetting.camera_list[DeviceSetting.cam_num_detected - 1].detect = true;
+	}
+
+	log_system("CAM DETECT -> %d, CAM COUNT RESET -> %d\n", DeviceSetting.cam_num_detected, DeviceSetting.count_cam_reset);
+
+	DeviceSetting.recover_active = false;
+	DeviceSetting.sms_enset = false;
+	DeviceSetting.com_enset = false;
+}
+

@@ -1,0 +1,33 @@
+#ifndef FW_H
+#define FW_H
+
+#include <stdio.h>
+#include <stdarg.h>
+#include <ql_oe.h>
+#include "database.h"
+
+int ec21_update_firmware(void);
+
+void mcu_update_firmware(void);
+
+int load_firmware_pkg(u16 pkg_index, u8* pkg_load, u16* pkg_len);
+void set_flg_mcu_update_fw(void);
+void set_flg_ec21_update_fw(void);
+
+void check_mcu_update_timeout(void);
+void set_firmware_crc(void);
+void set_firmware_nPKG(void);
+
+#define FW_PKG_SZ   2048
+
+#define APP_VERSION 			40   // them che do phat hien su kien dong mo cua
+
+#define RELEASE_DATE_TIME 		"270923"
+
+typedef enum{
+	UNKNOWN_MCU = 0,
+	STM32_MCU = 1,
+	GD32_MCU = 2
+}enum_MCU_type;
+
+#endif

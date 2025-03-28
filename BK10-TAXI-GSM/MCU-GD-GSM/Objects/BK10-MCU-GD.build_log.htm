@@ -1,0 +1,214 @@
+<html>
+<body>
+<pre>
+<h1>µVision Build Log</h1>
+<h2>Tool Versions:</h2>
+IDE-Version: µVision V5.33.0.0
+Copyright (C) 2020 ARM Ltd and ARM Germany GmbH. All rights reserved.
+License Information: FC FC, FC, LIC=03C6R-KT33V-8TS3P-MULWT-DXAR4-89US8
+ 
+Tool Versions:
+Toolchain:       MDK-ARM Plus  Version: 5.33.0.0
+Toolchain Path:  C:\Keil_v5\ARM\ARMCC\Bin
+C Compiler:      Armcc.exe V5.06 update 7 (build 960)
+Assembler:       Armasm.exe V5.06 update 7 (build 960)
+Linker/Locator:  ArmLink.exe V5.06 update 7 (build 960)
+Library Manager: ArmAr.exe V5.06 update 7 (build 960)
+Hex Converter:   FromElf.exe V5.06 update 7 (build 960)
+CPU DLL:         SARMCM3.DLL V5.33.0.0
+Dialog DLL:      DCM.DLL V1.17.3.0
+Target DLL:      STLink\ST-LINKIII-KEIL_SWO.dll V3.0.8.0
+Dialog DLL:      TCM.DLL V1.48.0.0
+ 
+<h2>Project:</h2>
+D:\PROJECTS\4G-Tracking\BK10\BK10-TAXI-GSM\MCU-GD-GSM\MCU_GD32F303RC.uvprojx
+Project File Date:  06/04/2024
+
+<h2>Output:</h2>
+*** Using Compiler 'V5.06 update 7 (build 960)', folder: 'C:\Keil_v5\ARM\ARMCC\Bin'
+Build target 'BK11-MCU'
+".\Objects\BK10-MCU-GD.axf" - 0 Error(s), 0 Warning(s).
+
+<h2>Software Packages used:</h2>
+
+Package Vendor: ARM
+                http://www.keil.com/pack/ARM.CMSIS.5.9.0.pack
+                ARM.CMSIS.5.9.0
+                CMSIS (Common Microcontroller Software Interface Standard)
+   * Component: RTOS Version: 1.0.0
+   * Component: CORE Version: 5.6.0
+   * Component: Keil RTX Version: 4.82.0
+
+Package Vendor: GigaDevice
+                http://gd32mcu.com/data/documents/pack/GigaDevice.GD32F30x_DFP.2.0.0.pack
+                GigaDevice.GD32F30x_DFP.2.0.0
+                GigaDevice GD32F30x Series Device Support and Examples
+   * Component: GD32F30x Version: 1.0.2
+   * Component: ADC Version: 1.0.2
+   * Component: BKP Version: 1.0.2
+   * Component: CAN Version: 1.0.2
+   * Component: CRC Version: 1.0.2
+   * Component: CTC Version: 1.0.2
+   * Component: DAC Version: 1.0.2
+   * Component: DBG Version: 1.0.2
+   * Component: DMA Version: 1.0.2
+   * Component: ENET Version: 1.0.2
+   * Component: EXMC Version: 1.0.2
+   * Component: EXTI Version: 1.0.2
+   * Component: FMC Version: 1.0.2
+   * Component: FWDGT Version: 1.0.2
+   * Component: GPIO Version: 1.0.2
+   * Component: I2C Version: 1.0.2
+   * Component: MISC Version: 1.0.2
+   * Component: PMU Version: 1.0.2
+   * Component: RCU Version: 1.0.2
+   * Component: RTC Version: 1.0.2
+   * Component: SDIO Version: 1.0.2
+   * Component: SPI_I2S Version: 1.0.2
+   * Component: TIMER Version: 1.0.2
+   * Component: USART Version: 1.0.2
+   * Component: WWDGT Version: 1.0.2
+   * Component: GD32F30x_libopt Version: 1.0.2
+   * Component: Startup Version: 1.0.2
+
+<h2>Collection of Component include folders:</h2>
+  .\RTE\_BK11-MCU
+  C:\Users\FC\AppData\Local\Arm\Packs\ARM\CMSIS\5.9.0\CMSIS\Core\Include
+  C:\Users\FC\AppData\Local\Arm\Packs\ARM\CMSIS\5.9.0\CMSIS\RTOS\RTX\INC
+  C:\Users\FC\AppData\Local\Arm\Packs\GigaDevice\GD32F30x_DFP\2.0.0\Device\Firmware\Peripherals\inc
+  C:\Users\FC\AppData\Local\Arm\Packs\GigaDevice\GD32F30x_DFP\2.0.0\Device\Include
+  C:\Users\FC\AppData\Local\Arm\Packs\GigaDevice\GD32F30x_DFP\2.0.0\Device\Template
+  C:\Users\FC\AppData\Local\Arm\Packs\GigaDevice\GD32F30x_DFP\2.0.0\Device\Utilities
+
+<h2>Collection of Component Files used:</h2>
+
+   * Component: ::CMSIS:RTOS:1.0.0 (API)
+
+   * Component: ARM::CMSIS:CORE:5.6.0
+
+   * Component: ARM::CMSIS:RTOS:Keil RTX:4.82.0
+      Include file:  CMSIS\RTOS\RTX\INC\cmsis_os.h
+      Source file:   CMSIS\RTOS\RTX\SRC\ARM\SVC_Table.s
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\Mutex.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\Timer.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\Semaphore.c
+      Source file:   CMSIS\RTOS\RTX\Templates\RTX_Conf_CM.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\main.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\MemPool.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\MsgQueue.c
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\MailQueue.c
+      Library file:  CMSIS\RTOS\RTX\LIB\ARM\RTX_CM4.lib
+      Include file:  CMSIS\RTOS\RTX\UserCodeTemplates\osObjects.h
+      Source file:   CMSIS\RTOS\RTX\UserCodeTemplates\Thread.c
+
+   * Component: GigaDevice::Device:EVAL:GD32F30x:1.0.2
+      Include file:  Device\Utilities\gd32f30x_eval.h
+      Source file:   Device\Utilities\gd32f30x_eval.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:ADC:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_adc.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_adc.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:BKP:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_bkp.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_bkp.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:CAN:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_can.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_can.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:CRC:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_crc.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_crc.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:CTC:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_ctc.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_ctc.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:DAC:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_dac.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_dac.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:DBG:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_dbg.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_dbg.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:DMA:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_dma.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_dma.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:ENET:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_enet.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_enet.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:EXMC:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_exmc.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_exmc.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:EXTI:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_exti.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_exti.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:FMC:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_fmc.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_fmc.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:FWDGT:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_fwdgt.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_fwdgt.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:GPIO:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_gpio.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_gpio.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:I2C:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_i2c.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_i2c.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:MISC:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_misc.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_misc.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:PMU:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_pmu.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_pmu.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:RCU:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_rcu.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_rcu.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:RTC:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_rtc.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_rtc.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:SDIO:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_sdio.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_sdio.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:SPI_I2S:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_spi.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_spi.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:TIMER:1.0.2
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_timer.h
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_timer.c
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:USART:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_usart.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_usart.h
+
+   * Component: GigaDevice::Device:GD32F30x_StdPeripherals:WWDGT:1.0.2
+      Source file:   Device\Firmware\Peripherals\src\gd32f30x_wwdgt.c
+      Include file:  Device\Firmware\Peripherals\inc\gd32f30x_wwdgt.h
+
+   * Component: GigaDevice::Device:GD32F30x_libopt:1.0.2
+      Include file:  Device\Template\gd32f30x_libopt.h
+
+   * Component: GigaDevice::Device:Startup:1.0.2
+      Source file:   Device\Source\ARM\startup_gd32f30x_hd.s
+      Include file:  Device\Include\gd32f30x.h
+      Source file:   Device\Source\system_gd32f30x.c
+Build Time Elapsed:  00:00:00
+</pre>
+</body>
+</html>
